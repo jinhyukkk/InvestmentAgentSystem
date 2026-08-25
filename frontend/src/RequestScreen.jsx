@@ -89,7 +89,6 @@ export default function RequestScreen() {
   const [elapsed, setElapsed] = useState(0);
   const [loading, setLoading] = useState(false);
   const [liveMessage, setLiveMessage] = useState(null);
-  const [error, setError] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
   const startedAt = useRef(null);
@@ -119,12 +118,16 @@ export default function RequestScreen() {
     setSteps((prev) => prev.map((s, i) => (i === index ? { ...s, state } : s)));
   }
 
+  // 에러도 에이전트 답변처럼 대화창 안에 message만 노출한다 — 스택/원본 응답은 보여주지 않는다.
+  function pushErrorMessage(text) {
+    setConversation((c) => [...c, { role: "ai", data: { message: text } }]);
+  }
+
   async function submit() {
     if (!message.trim() || loading) return;
     startedAt.current = Date.now();
     setCaseTitle(message.slice(0, 24));
     setLoading(true);
-    setError(null);
     const sentMessage = message;
     const files = pendingFiles;
     setConversation([{ role: "user", text: sentMessage, files: files.map((f) => ({ name: f.name, size: formatSize(f.size) })) }]);
@@ -170,7 +173,7 @@ export default function RequestScreen() {
           return;
         }
         if (evt.type === "error") {
-          setError(evt.message);
+          pushErrorMessage(evt.message);
           return;
         }
         if (live) {
@@ -179,7 +182,7 @@ export default function RequestScreen() {
         }
       });
     } catch (e) {
-      setError(String(e));
+      pushErrorMessage("요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
       setLiveMessage(null);
@@ -189,7 +192,6 @@ export default function RequestScreen() {
   async function sendFollowUp(text) {
     if (!text.trim() || !chatId || loading) return;
     setLoading(true);
-    setError(null);
     setConversation((c) => [...c, { role: "user", text }]);
     setMessage("");
 
@@ -209,7 +211,7 @@ export default function RequestScreen() {
           return;
         }
         if (evt.type === "error") {
-          setError(evt.message);
+          pushErrorMessage(evt.message);
           return;
         }
         if (live) {
@@ -218,7 +220,7 @@ export default function RequestScreen() {
         }
       });
     } catch (e) {
-      setError(String(e));
+      pushErrorMessage("요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
       setLiveMessage(null);
@@ -273,8 +275,6 @@ export default function RequestScreen() {
             <AiMessage data={liveMessage} streaming />
           </div>
         )}
-        {error && <div style={{ color: "#C0392B", fontSize: 12.5 }}>{error}</div>}
-
         <div
           style={{
             ...s.composer,

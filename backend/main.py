@@ -46,6 +46,12 @@ def ndjson(obj) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def friendly_error(e: Exception) -> str:
+    """원본 예외/응답 바디는 서버 로그에만 남기고, 프론트에는 사람이 읽을 메시지만 보낸다."""
+    print(f"[review-error] {e!r}")
+    return "요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+
+
 def _post_chat_stream(url: str, body: dict):
     """POST 하나의 SSE 파싱된 파트를 하나씩 yield. [DONE]에서 멈춘다."""
     resp = requests.post(
@@ -168,10 +174,8 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
             for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message):
                 yield ndjson(evt)
             yield ndjson({"type": "turn-end"})
-    except requests.HTTPError as e:
-        yield ndjson({"type": "error", "message": e.response.text})
     except Exception as e:
-        yield ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        yield ndjson({"type": "error", "message": friendly_error(e)})
 
 
 def stream_continue(chat_id: str, message: str):
@@ -180,10 +184,8 @@ def stream_continue(chat_id: str, message: str):
         for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message):
             yield ndjson(evt)
         yield ndjson({"type": "turn-end"})
-    except requests.HTTPError as e:
-        yield ndjson({"type": "error", "message": e.response.text})
     except Exception as e:
-        yield ndjson({"type": "error", "message": f"{type(e).__name__}: {e}"})
+        yield ndjson({"type": "error", "message": friendly_error(e)})
 
 
 @app.post("/api/review")
