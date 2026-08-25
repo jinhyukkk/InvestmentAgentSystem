@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>유진그룹 투자심의 시스템</title>
+    <link
+      rel="stylesheet"
+      as="style"
+      href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css"
+    />
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-thumb { background: #CDD3DB; border-radius: 6px; border: 3px solid transparent; background-clip: padding-box; }
+
+      .md-content { font-size: 13.5px; line-height: 1.7; color: #1B2431; }
+      .md-content > *:first-child { margin-top: 0; }
+      .md-content > *:last-child { margin-bottom: 0; }
+      .md-content h1, .md-content h2, .md-content h3 { font-weight: 700; letter-spacing: -0.01em; margin: 16px 0 8px; }
+      .md-content h1 { font-size: 17px; }
+      .md-content h2 { font-size: 15.5px; }
+      .md-content h3 { font-size: 14px; }
+      .md-content p { margin: 0 0 10px; }
+      .md-content ul, .md-content ol { margin: 0 0 10px; padding-left: 20px; }
+      .md-content li { margin: 3px 0; }
+      .md-content strong { font-weight: 700; }
+      .md-content code { background: #F1F3F6; border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+      .md-content pre { background: #F7F9FB; border: 1px solid #E7EAEE; border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+      .md-content a { color: #274A72; }
+      .md-content table { border-collapse: collapse; width: 100%; margin: 0 0 12px; font-size: 12.5px; }
+      .md-content th, .md-content td { border: 1px solid #E7EAEE; padding: 6px 10px; text-align: left; }
+      .md-content th { background: #F7F9FB; font-weight: 600; }
+      .md-content blockquote { border-left: 3px solid #DCE4EE; margin: 0 0 10px; padding: 2px 12px; color: #5A6473; }
+      .md-content hr { border: none; border-top: 1px solid #F0F2F5; margin: 14px 0; }
+
+      @keyframes typing-bounce {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+        30% { transform: translateY(-4px); opacity: 1; }
+      }
+      .typing-dots { display: inline-flex; align-items: center; gap: 4px; }
+      .typing-dots span { width: 6px; height: 6px; border-radius: 50%; background: #8A94A3; animation: typing-bounce 1.2s infinite ease-in-out; }
+      .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+      .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+
+      @keyframes avatar-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(39, 74, 114, 0.25); }
+        50% { box-shadow: 0 0 0 6px rgba(39, 74, 114, 0); }
+      }
+      .avatar-pulse { animation: avatar-pulse 1.6s infinite; }
+
+      @keyframes step-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(62, 142, 208, 0.35); }
+        50% { box-shadow: 0 0 0 5px rgba(62, 142, 208, 0); }
+      }
+      .step-pulse { animation: step-pulse 1.4s infinite; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
