@@ -15,6 +15,7 @@ import requests
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 def load_env_file() -> None:
     """.env 의 KEY=VALUE 를 환경변수로 올린다 (이미 설정된 환경변수가 우선)."""
@@ -34,6 +35,7 @@ load_env_file()  # AGENT_ID·API_KEY 를 읽기 전에 올려야 .env 값이 먹
 WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
 MAX_AUTO_APPROVALS = 5  # ponytail: 무한 루프 방지용 상한. 더 긴 조사가 필요하면 올리기
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 API_KEY = os.environ.get("WRKS_API_KEY", "")
 if not API_KEY:
@@ -380,3 +382,7 @@ async def start_review(message: str = Form(...), files: list[UploadFile] = File(
 async def continue_review(chat_id: str, message: str = Form(...)):
     """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이."""
     return StreamingResponse(stream_continue(chat_id, message), media_type="application/x-ndjson")
+
+
+if os.path.isdir(STATIC_DIR):
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

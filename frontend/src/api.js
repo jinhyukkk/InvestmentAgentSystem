@@ -1,4 +1,5 @@
-const API_BASE = "http://localhost:8787";
+// 개발 중에는 VITE_API_BASE 로 백엔드 주소(:8787)를 지정하고, 배포 시엔 같은 오리진(상대경로)을 쓴다.
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 // 백엔드가 NDJSON(줄 단위 JSON)으로 실시간 이벤트를 흘려보내면, 도착하는 즉시 onEvent로 넘긴다.
 async function streamNdjson(url, form, onEvent) {
