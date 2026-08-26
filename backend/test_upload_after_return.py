@@ -91,6 +91,10 @@ assert types.count("file-uploaded") == 3, f"업로드 성공 3건이 아님: {ty
 review_body = chat_bodies[-1]
 assert review_body.get("imageFileIds") == [7], f"imageFileIds 누락: {review_body}"
 
+# 2-1) 질문 앞에 첨부 파일 목록이 붙어야 한다 (없으면 에이전트가 검색을 안 함)
+assert review_body["message"].startswith("[첨부 자료 3건:"), f"매니페스트 누락: {review_body['message'][:80]}"
+assert "이 IM 분석해줘" in review_body["message"]
+
 # 3) 엑셀은 .md 로 변환돼 올라가야 한다
 md = next((u for u in uploads if u[0] == "model.md"), None)
 assert md, f"model.md 업로드 없음: {[u[0] for u in uploads]}"

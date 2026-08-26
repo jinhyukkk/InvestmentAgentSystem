@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import time
 
 import requests
 from fastapi import FastAPI, File, Form, UploadFile
@@ -55,6 +56,9 @@ def friendly_error(e: Exception) -> str:
     """원본 예외/응답 바디는 서버 로그에만 남기고, 프론트에는 사람이 읽을 메시지만 보낸다."""
     # print는 uvicorn 아래서 버퍼링돼 진단이 유실된다 — 로거를 써야 바로 남는다
     logger.exception("심의 요청 처리 실패: %r", e)
+    if isinstance(e, requests.Timeout):
+        # 통짜 문구로 묻으면 "왜 안 넘어가는지" 또 알 수 없게 된다
+        return "AI 응답이 오래 멈춰 중단했습니다. 자료를 나눠 올리거나 다시 시도해 주세요."
     return "요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
 
@@ -64,6 +68,14 @@ class UploadRejected(Exception):
 
 XLSX_EXTENSIONS = (".xlsx", ".xlsm")
 XLSX_MAX_ROWS = 2000  # ponytail: 시트당 상한. 더 큰 재무모델을 통째로 넣어야 하면 올리기
+# 문서상 업로드 응답 = 인덱싱 완료지만, 실측으론 여러 파일을 올리고 곧바로 질문하면
+# 첫 턴에서 검색 인덱스에 안 잡힌다(다음 턴에는 잡힘). 반영될 틈을 준다.
+INDEX_SETTLE_SECONDS = 3  # ponytail: 고정 대기. 대용량에서도 첫 턴 인식이 안 되면 파일 수·크기 비례로
+# (연결, 읽기) 타임아웃. 읽기 쪽은 '바이트 사이 간격' 기준이라 전체 소요시간과 다르다 —
+# 심의 한 판은 15분 넘게 걸리지만 그동안 도구 이벤트가 계속 흐른다. 상류가 조용히 멎으면
+# 타임아웃 없이는 브라우저 연결을 붙든 채 영원히 대기한다(실측: 도구 호출에서 안 넘어감).
+CHAT_TIMEOUT = (10, 300)
+UPLOAD_TIMEOUT = (10, 300)  # 업로드 응답 = 파싱·인덱싱 완료라 대용량 문서는 오래 걸린다
 UPLOAD_REJECTIONS = {
     413: "파일이 100MB를 넘습니다",
     415: "지원하지 않는 파일 형식입니다 (pdf·docx·doc·pptx·hwp·hwpx·txt·md·png·jpg)",
@@ -122,6 +134,7 @@ def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -
         headers=HEADERS,
         params={"chatId": chat_id},
         files={"file": (filename, content, content_type)},
+        timeout=UPLOAD_TIMEOUT,
     )
     if r.status_code >= 400:
         logger.warning("업로드 거절: %s %s %s", original, r.status_code, r.text[:300])
@@ -142,6 +155,7 @@ def _post_chat_stream(url: str, body: dict):
         headers={**HEADERS, "Content-Type": "application/json"},
         json=body,
         stream=True,
+        timeout=CHAT_TIMEOUT,
     )
     try:
         resp.raise_for_status()
@@ -187,8 +201,11 @@ def wrks_chat_events(url: str, message: str, image_file_ids: list[int] | None = 
     for attempt in range(MAX_AUTO_APPROVALS + 1):
         pending_approval_id = None
         finish_reason = None
+        produced_text = False
         for evt in _post_chat_stream(url, body):
             t = evt.get("type")
+            if t == "text-delta":
+                produced_text = True
             if t == "chat-id":
                 chat_id = evt.get("chatId")
                 yield {"type": "meta", "chatId": chat_id}
@@ -208,9 +225,22 @@ def wrks_chat_events(url: str, message: str, image_file_ids: list[int] | None = 
             yield evt
 
         if finish_reason != "tool-calls" or not pending_approval_id:
+            if finish_reason and finish_reason != "stop":
+                logger.warning(
+                    "턴이 stop이 아닌 사유로 종료: %s (chat=%s, 텍스트=%s)", finish_reason, chat_id, produced_text
+                )
+                if not produced_text:
+                    # 실측: finishReason=error 인데 error 파트가 안 온다. 이대로 두면 답변도
+                    # 에러도 없이 턴만 끝나 화면이 "생각 중"에서 멎은 것처럼 보인다.
+                    yield {
+                        "type": "error",
+                        "message": "AI가 답변을 만들지 못한 채 중단했습니다. 같은 대화에서 '계속 진행해'라고 다시 요청해 보세요.",
+                    }
             return
+        logger.info("도구 승인 자동 처리 %d/%d (chat=%s)", attempt + 1, MAX_AUTO_APPROVALS, chat_id)
         if attempt == MAX_AUTO_APPROVALS:
-            yield {"type": "error", "message": f"도구 호출이 {MAX_AUTO_APPROVALS}회 자동 승인 후에도 끝나지 않아 중단했습니다."}
+            logger.warning("자동 승인 상한 도달 (chat=%s)", chat_id)
+            yield {"type": "error", "message": f"도구 호출이 {MAX_AUTO_APPROVALS}회 자동 승인 후에도 끝나지 않아 중단했습니다. 다시 시도하거나 요청을 나눠서 진행해 주세요."}
             return
         url = f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}"
         body = {"agentId": AGENT_ID, "approval": {"id": pending_approval_id, "approved": True}}
@@ -254,6 +284,7 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
             return
 
         image_file_ids = []
+        uploaded_names = []
         for filename, content, content_type in files:
             try:
                 data = upload_one(chat_id, filename, content, content_type)
@@ -263,9 +294,15 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
                 continue
             if data.get("imageUrl"):  # 이미지 응답에만 있다 = 대화에 안 묶였다는 뜻
                 image_file_ids.append(data["fileId"])
+            uploaded_names.append(data.get("filename", filename))
             yield ndjson({"type": "file-uploaded", "file": data})
 
         if has_files:
+            if uploaded_names:
+                # 에이전트는 컨텍스트에 파일 표시가 없으면 검색을 시도조차 안 한다(실측).
+                # 어떤 파일이 첨부됐는지 질문에 명시해 문서 검색을 유도한다.
+                message = f"[첨부 자료 {len(uploaded_names)}건: {', '.join(uploaded_names)} — 이 대화에 업로드되어 있으니 문서 검색으로 반드시 조회할 것]\n\n{message}"
+                time.sleep(INDEX_SETTLE_SECONDS)
             yield ndjson({"type": "turn-start"})
             for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message, image_file_ids):
                 yield ndjson(evt)
