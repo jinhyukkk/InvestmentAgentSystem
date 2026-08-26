@@ -164,7 +164,9 @@ export default function RequestScreen() {
           else setStep(2, "done");
           return;
         }
-        if (evt.type === "file-uploaded") {
+        // 거절된 파일도 세어야 한다 — 안 그러면 "자료 업로드" 단계가 영영 안 끝난다.
+        if (evt.type === "file-uploaded" || evt.type === "file-error") {
+          if (evt.type === "file-error") pushErrorMessage(evt.message);
           uploadedCount += 1;
           if (uploadedCount === files.length) {
             setStep(1, "done");

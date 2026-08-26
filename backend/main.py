@@ -5,7 +5,9 @@ WRKS_API_KEY 를 서버에서만 보관하고, 프론트엔드는 이 프록시�
 그대로 NDJSON으로 릴레이한다 — 프론트가 타이핑되는 것처럼 실시간 렌더링할 수 있게.
 실행: uvicorn main:app --reload --port 8787
 """
+import io
 import json
+import logging
 import os
 
 import requests
@@ -46,10 +48,91 @@ def ndjson(obj) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+logger = logging.getLogger("investment-proxy")
+
+
 def friendly_error(e: Exception) -> str:
     """원본 예외/응답 바디는 서버 로그에만 남기고, 프론트에는 사람이 읽을 메시지만 보낸다."""
-    print(f"[review-error] {e!r}")
+    # print는 uvicorn 아래서 버퍼링돼 진단이 유실된다 — 로거를 써야 바로 남는다
+    logger.exception("심의 요청 처리 실패: %r", e)
     return "요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+
+
+class UploadRejected(Exception):
+    """사용자에게 그대로 보여줘도 되는 업로드 실패(형식·크기 등)."""
+
+
+XLSX_EXTENSIONS = (".xlsx", ".xlsm")
+XLSX_MAX_ROWS = 2000  # ponytail: 시트당 상한. 더 큰 재무모델을 통째로 넣어야 하면 올리기
+UPLOAD_REJECTIONS = {
+    413: "파일이 100MB를 넘습니다",
+    415: "지원하지 않는 파일 형식입니다 (pdf·docx·doc·pptx·hwp·hwpx·txt·md·png·jpg)",
+}
+
+
+def xlsx_to_markdown(filename: str, content: bytes) -> tuple[str, bytes, str]:
+    """엑셀을 시트별 마크다운 표로 바꿔 .md 로 올린다.
+
+    웍스 v2 파일 업로드는 엑셀을 415로 거절하는데(실측), 투자심의에서 재무모델은
+    엑셀로 오는 게 보통이라 텍스트로 변환해 넣는다. data_only=True 는 수식이 아니라
+    '엑셀이 마지막으로 저장한 계산값'을 읽는다 — 심의에는 값이 필요하기 때문.
+    엑셀로 한 번도 연 적 없이 생성된 파일은 캐시된 값이 없어 빈 칸이 될 수 있다.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    lines = []
+    try:
+        for ws in wb.worksheets:
+            lines.append(f"## 시트: {ws.title}")
+            need_header_rule = True
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= XLSX_MAX_ROWS:
+                    lines.append(f"_({XLSX_MAX_ROWS}행 초과분은 생략됨)_")
+                    break
+                cells = ["" if c is None else str(c).replace("|", "\\|") for c in row]
+                if not any(c.strip() for c in cells):
+                    continue
+                lines.append("| " + " | ".join(cells) + " |")
+                if need_header_rule:  # 마크다운 표는 구분선이 있어야 표로 읽힌다
+                    lines.append("|" + "---|" * len(cells))
+                    need_header_rule = False
+            lines.append("")
+    finally:
+        wb.close()
+
+    return filename.rsplit(".", 1)[0] + ".md", "\n".join(lines).encode("utf-8"), "text/markdown"
+
+
+def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -> dict:
+    """파일 하나를 웍스에 올리고 data를 반환. 거절되면 조치 가능한 문구로 바꿔 올린다."""
+    original = filename
+    if filename.lower().endswith(XLSX_EXTENSIONS):
+        try:
+            filename, content, content_type = xlsx_to_markdown(filename, content)
+        except Exception:
+            logger.warning("엑셀 변환 실패: %s", original, exc_info=True)
+            raise UploadRejected(f"{original}: 엑셀을 읽지 못했습니다")
+        # 표 한 줄도 안 나왔다면 빈 파일을 올려 심의에서 조용히 누락되게 두지 않는다
+        if b"|" not in content:
+            raise UploadRejected(f"{original}: 엑셀에서 읽을 데이터가 없습니다 (빈 시트이거나 계산값 미저장)")
+
+    r = requests.post(
+        f"{WRKS_BASE_URL}/v2/files",
+        headers=HEADERS,
+        params={"chatId": chat_id},
+        files={"file": (filename, content, content_type)},
+    )
+    if r.status_code >= 400:
+        logger.warning("업로드 거절: %s %s %s", original, r.status_code, r.text[:300])
+        reason = UPLOAD_REJECTIONS.get(r.status_code, f"업로드에 실패했습니다 ({r.status_code})")
+        raise UploadRejected(f"{original}: {reason}")
+
+    data = r.json().get("data")
+    if not data:  # 2xx인데 data가 없는 응답도 실측된다 — 통짜 에러로 새지 않게 여기서 잡는다
+        logger.warning("업로드 응답에 data 없음: %s %s", original, r.text[:300])
+        raise UploadRejected(f"{original}: 업로드에 실패했습니다")
+    return data
 
 
 def _post_chat_stream(url: str, body: dict):
@@ -60,20 +143,24 @@ def _post_chat_stream(url: str, body: dict):
         json=body,
         stream=True,
     )
-    resp.raise_for_status()
-    for raw in resp.iter_lines():
-        if not raw or not raw.startswith(b"data: "):
-            continue
-        payload = raw[6:]
-        if payload == b"[DONE]":
-            return
-        try:
-            yield json.loads(payload.decode("utf-8"))
-        except ValueError:
-            continue
+    try:
+        resp.raise_for_status()
+        for raw in resp.iter_lines():
+            if not raw or not raw.startswith(b"data: "):
+                continue
+            payload = raw[6:]
+            if payload == b"[DONE]":
+                return
+            try:
+                yield json.loads(payload.decode("utf-8"))
+            except ValueError:
+                continue
+    finally:
+        # 호출자가 chatId만 받고 중도 이탈(close)해도 커넥션을 반납한다
+        resp.close()
 
 
-def wrks_chat_events(url: str, message: str):
+def wrks_chat_events(url: str, message: str, image_file_ids: list[int] | None = None):
     """SSE 파트를 하나씩 그대로 yield (버퍼링 없음).
 
     실측 결과 실제 엔드포인트는 POST /v2/chat/stream(신규) ·
@@ -94,6 +181,9 @@ def wrks_chat_events(url: str, message: str):
     """
     chat_id = None
     body = {"message": message, "agentId": AGENT_ID}
+    if image_file_ids:
+        # 이미지는 업로드해도 대화에 묶이지 않는다 — 여기 실어 보내야 모델이 본다
+        body["imageFileIds"] = image_file_ids
     for attempt in range(MAX_AUTO_APPROVALS + 1):
         pending_approval_id = None
         finish_reason = None
@@ -136,16 +226,20 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
     """
     try:
         has_files = bool(files)
-        first_message = "문서를 첨부할게" if has_files else message
+        first_message = "자료를 첨부할게" if has_files else message
         chat_id = None
 
         events = wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream", first_message)
         if has_files:
-            for evt in events:  # 자리표시자 응답 본문은 프론트에 보여주지 않고 버린다
+            for evt in events:  # 자리표시자 답변 본문은 버리지만 에러까지 버리면 원인이 사라진다
+                if evt["type"] == "error":
+                    yield ndjson(evt)
+                    continue
                 if evt["type"] == "meta":
                     chat_id = evt["chatId"]
                     yield ndjson(evt)
                     break
+            events.close()  # 남은 자리표시자 스트림은 안 읽고 끊는다
         else:
             yield ndjson({"type": "turn-start"})
             for evt in events:
@@ -155,23 +249,25 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
             yield ndjson({"type": "turn-end"})
 
         if not chat_id:
-            yield ndjson({"type": "error", "message": "웍스AI가 chatId를 반환하지 않았습니다."})
+            logger.warning("자리표시자 턴에서 chatId를 못 받음 (files=%d)", len(files))
+            yield ndjson({"type": "error", "message": "대화를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요."})
             return
 
+        image_file_ids = []
         for filename, content, content_type in files:
-            r = requests.post(
-                f"{WRKS_BASE_URL}/v2/files",
-                headers=HEADERS,
-                params={"chatId": chat_id},
-                files={"file": (filename, content, content_type)},
-            )
-            r.raise_for_status()
-            data = r.json()["data"]
+            try:
+                data = upload_one(chat_id, filename, content, content_type)
+            except UploadRejected as e:
+                # 한 파일이 거절돼도 나머지는 진행하되, 어떤 파일이 왜 빠졌는지는 알린다
+                yield ndjson({"type": "file-error", "message": str(e)})
+                continue
+            if data.get("imageUrl"):  # 이미지 응답에만 있다 = 대화에 안 묶였다는 뜻
+                image_file_ids.append(data["fileId"])
             yield ndjson({"type": "file-uploaded", "file": data})
 
         if has_files:
             yield ndjson({"type": "turn-start"})
-            for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message):
+            for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message, image_file_ids):
                 yield ndjson(evt)
             yield ndjson({"type": "turn-end"})
     except Exception as e:
