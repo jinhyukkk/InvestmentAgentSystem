@@ -12,6 +12,11 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
+// 에러만 오고 끝난 턴은 빈 말풍선을 남기면 안 된다 — 실제로 담긴 게 있는지 본다.
+function hasContent(m) {
+  return !!(m && (m.message || m.reasoning || m.toolCalls.length));
+}
+
 function formatElapsed(sec) {
   const m = String(Math.floor(sec / 60)).padStart(2, "0");
   const s = String(sec % 60).padStart(2, "0");
@@ -157,11 +162,12 @@ export default function RequestScreen() {
         }
         if (evt.type === "turn-end") {
           const finished = live;
-          setConversation((c) => [...c, { role: "ai", data: finished }]);
-          setLiveMessage(null);
           live = null;
-          if (hasFiles) setStep(3, "done");
-          else setStep(2, "done");
+          setLiveMessage(null);
+          // 답변이 안 온 턴은 빈 말풍선도, 완료(✓) 표시도 남기지 않는다
+          if (!hasContent(finished)) return;
+          setConversation((c) => [...c, { role: "ai", data: finished }]);
+          setStep(hasFiles ? 3 : 2, "done");
           return;
         }
         // 거절된 파일도 세어야 한다 — 안 그러면 "자료 업로드" 단계가 영영 안 끝난다.
@@ -207,9 +213,9 @@ export default function RequestScreen() {
         }
         if (evt.type === "turn-end") {
           const finished = live;
-          setConversation((c) => [...c, { role: "ai", data: finished }]);
-          setLiveMessage(null);
           live = null;
+          setLiveMessage(null);
+          if (hasContent(finished)) setConversation((c) => [...c, { role: "ai", data: finished }]);
           return;
         }
         if (evt.type === "error") {
