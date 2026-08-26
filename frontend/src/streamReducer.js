@@ -1,14 +1,15 @@
 // 백엔드가 릴레이하는 웍스AI SSE 이벤트를 하나씩 누적해 AiMessage가 바로 그릴 수 있는 형태로 만든다.
 // 답변 텍스트와 도구 호출을 하나의 blocks 배열에 도착 순서대로 쌓아 시간순 렌더링이 가능하게 한다.
 export function newLiveMessage() {
-  return { blocks: [], reasoning: "", model: null, finishReason: null, usage: null };
+  return { blocks: [], model: null, finishReason: null, usage: null };
 }
 
-// 연속된 text-delta는 마지막 텍스트 블록에 이어 붙이고, 도구 호출을 만나면 새 텍스트 블록이 시작된다.
-function appendText(blocks, delta) {
+// 연속된 같은 종류의 delta는 마지막 블록에 이어 붙이고, 다른 종류를 만나면 새 블록이 시작된다.
+// 추론·도구·답변이 번갈아 오는 턴에서 "추론 → 도구 → 추론" 순서가 그대로 보이게 하는 핵심.
+function appendDelta(blocks, type, delta) {
   const last = blocks[blocks.length - 1];
-  if (last && last.type === "text") return [...blocks.slice(0, -1), { ...last, text: last.text + delta }];
-  return [...blocks, { type: "text", text: delta }];
+  if (last && last.type === type) return [...blocks.slice(0, -1), { ...last, text: last.text + delta }];
+  return [...blocks, { type, text: delta }];
 }
 
 // 도구 결과 모양이 도구마다 다르다 — MCP 도구는 {content:[{text}]}/{structuredContent},
@@ -30,9 +31,9 @@ export function applyEvent(msg, evt) {
     case "data-usage":
       return { ...msg, model: evt.data };
     case "text-delta":
-      return { ...msg, blocks: appendText(msg.blocks, evt.delta || "") };
+      return { ...msg, blocks: appendDelta(msg.blocks, "text", evt.delta || "") };
     case "reasoning-delta":
-      return { ...msg, reasoning: msg.reasoning + (evt.delta || "") };
+      return { ...msg, blocks: appendDelta(msg.blocks, "reasoning", evt.delta || "") };
     case "tool-input-available":
       return {
         ...msg,

@@ -14,7 +14,14 @@ function formatSize(bytes) {
 
 // 에러만 오고 끝난 턴은 빈 말풍선을 남기면 안 된다 — 실제로 담긴 게 있는지 본다.
 function hasContent(m) {
-  return !!(m && (m.blocks.length || m.reasoning));
+  return !!(m && m.blocks.length);
+}
+
+// 업로드 결과를 도구 블록 본문으로. 엑셀은 md로 변환돼 올라가므로 그 과정을 그대로 적는다.
+function describeUpload(file) {
+  const converted = file.original && file.original !== file.filename;
+  const size = file.size ? ` (${formatSize(file.size)})` : "";
+  return converted ? `${file.original}\n→ ${file.filename}${size} 로 변환해 업로드했습니다.` : `${file.filename}${size} 업로드 완료`;
 }
 
 function formatElapsed(sec) {
@@ -146,6 +153,15 @@ export default function RequestScreen() {
     let live = null;
     let uploadedCount = 0;
 
+    // 자료 변환·업로드도 에이전트가 하는 일이므로 도구 호출과 같은 모양으로 보여준다.
+    if (hasFiles) {
+      live = {
+        ...newLiveMessage(),
+        blocks: files.map((f, i) => ({ type: "tool", id: `upload-${i}`, client: "자료", name: "파일 변환·업로드" })),
+      };
+      setLiveMessage(live);
+    }
+
     try {
       await streamStartReview(sentMessage, files, (evt) => {
         if (evt.type === "meta") {
@@ -156,7 +172,7 @@ export default function RequestScreen() {
         if (evt.type === "turn-start") {
           // 파일이 있으면 파일을 본 뒤의 검토 턴 하나만 스트리밍된다(사전 스캔 단계는 건너뜀).
           if (hasFiles) setStep(3, "running");
-          live = newLiveMessage();
+          if (!live) live = newLiveMessage(); // 업로드 블록이 이미 쌓여 있으면 이어서 붙인다
           setLiveMessage(live);
           return;
         }
@@ -173,6 +189,29 @@ export default function RequestScreen() {
         // 거절된 파일도 세어야 한다 — 안 그러면 "자료 업로드" 단계가 영영 안 끝난다.
         if (evt.type === "file-uploaded" || evt.type === "file-error") {
           if (evt.type === "file-error") pushErrorMessage(evt.message);
+          // 해당 파일의 업로드 블록을 결과로 채운다 — 결과가 없으면 화면이 영영 "실행 중"에 멎는다
+          if (live) {
+            const output = evt.type === "file-error" ? `⚠️ ${evt.message}` : describeUpload(evt.file);
+            live = { ...live, blocks: live.blocks.map((b) => (b.id === `upload-${uploadedCount}` ? { ...b, output } : b)) };
+            setLiveMessage(live);
+          }
+          // 엑셀은 서버에서 md로 변환돼 올라간다 — 배지를 실제 올라간 이름·크기로 바꾼다.
+          // 업로드 결과는 첨부 순서대로 오므로 uploadedCount가 곧 파일 인덱스다.
+          if (evt.file?.filename) {
+            const idx = uploadedCount;
+            setConversation((c) =>
+              c.map((m, mi) =>
+                mi === 0 && m.files
+                  ? {
+                      ...m,
+                      files: m.files.map((f, fi) =>
+                        fi === idx ? { name: evt.file.filename, size: evt.file.size ? formatSize(evt.file.size) : f.size } : f
+                      ),
+                    }
+                  : m
+              )
+            );
+          }
           uploadedCount += 1;
           if (uploadedCount === files.length) {
             setStep(1, "done");
