@@ -16,25 +16,45 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+def load_env_file() -> None:
+    """.env 의 KEY=VALUE 를 환경변수로 올린다 (이미 설정된 환경변수가 우선)."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(env_path):
+        return
+    for line in open(env_path, encoding="utf-8"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+load_env_file()  # AGENT_ID·API_KEY 를 읽기 전에 올려야 .env 값이 먹는다
+
 WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
 MAX_AUTO_APPROVALS = 5  # ponytail: 무한 루프 방지용 상한. 더 긴 조사가 필요하면 올리기
 
-
-def load_api_key() -> str:
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_path):
-        for line in open(env_path, encoding="utf-8"):
-            if line.startswith("WRKS_API_KEY="):
-                os.environ.setdefault("WRKS_API_KEY", line.split("=", 1)[1].strip())
-    key = os.environ.get("WRKS_API_KEY", "")
-    if not key:
-        raise RuntimeError(".env 에 WRKS_API_KEY 를 설정하세요 (.env.example 참고)")
-    return key
+API_KEY = os.environ.get("WRKS_API_KEY", "")
+if not API_KEY:
+    raise RuntimeError(".env 에 WRKS_API_KEY 를 설정하세요 (.env.example 참고)")
 
 
-API_KEY = load_api_key()
-HEADERS = {"API-KEY": API_KEY}
+def actor_header() -> dict:
+    """호출 주체(직원) 구분 헤더. 이메일과 사용자 번호는 둘 중 하나만 보내야 한다."""
+    email = os.environ.get("WRKS_ACTOR_USER_EMAIL", "")
+    user_id = os.environ.get("WRKS_ACTOR_USER_ID", "")
+    if email and user_id:
+        # 웍스는 두 헤더를 동시에 받으면 오류를 낸다 — 기동 시점에 막아 런타임에 새지 않게 한다
+        raise RuntimeError("WRKS_ACTOR_USER_EMAIL 과 WRKS_ACTOR_USER_ID 는 함께 쓸 수 없습니다 — 하나만 설정하세요")
+    if user_id:
+        return {"X-Actor-User-Id": user_id}
+    if email:
+        return {"X-Actor-User-Email": email}
+    return {}
+
+
+HEADERS = {"API-KEY": API_KEY, **actor_header()}
 
 app = FastAPI(title="투자심의 에이전트 프록시")
 app.add_middleware(
@@ -68,6 +88,10 @@ class UploadRejected(Exception):
 
 XLSX_EXTENSIONS = (".xlsx", ".xlsm")
 XLSX_MAX_ROWS = 2000  # ponytail: 시트당 상한. 더 큰 재무모델을 통째로 넣어야 하면 올리기
+# 변환본이 이보다 작으면 질문에 원문을 그대로 실어 보낸다. 웍스 문서 검색은 업로드본을 조각내
+# 돌려주는데, 재무모델 표는 전체를 봐야 뜻이 통해 조각만으로는 에이전트가 "파일이 로드되지
+# 않았다"고 답해버린다(실측). 큰 파일까지 실으면 컨텍스트·토큰이 터지므로 상한을 둔다.
+INLINE_MAX_BYTES = 60_000  # ponytail: 컨텍스트가 넉넉해지면 올리기
 # 문서상 업로드 응답 = 인덱싱 완료지만, 실측으론 여러 파일을 올리고 곧바로 질문하면
 # 첫 턴에서 검색 인덱스에 안 잡힌다(다음 턴에는 잡힘). 반영될 틈을 준다.
 INDEX_SETTLE_SECONDS = 3  # ponytail: 고정 대기. 대용량에서도 첫 턴 인식이 안 되면 파일 수·크기 비례로
@@ -116,9 +140,13 @@ def xlsx_to_markdown(filename: str, content: bytes) -> tuple[str, bytes, str]:
     return filename.rsplit(".", 1)[0] + ".md", "\n".join(lines).encode("utf-8"), "text/markdown"
 
 
-def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -> dict:
-    """파일 하나를 웍스에 올리고 data를 반환. 거절되면 조치 가능한 문구로 바꿔 올린다."""
+def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -> tuple[dict, str]:
+    """파일 하나를 웍스에 올리고 (data, 질문에 실을 원문)을 반환.
+
+    원문은 엑셀 변환본이 INLINE_MAX_BYTES 이하일 때만 채워진다. 거절되면 조치 가능한 문구로 바꿔 올린다.
+    """
     original = filename
+    inline = ""
     if filename.lower().endswith(XLSX_EXTENSIONS):
         try:
             filename, content, content_type = xlsx_to_markdown(filename, content)
@@ -128,6 +156,8 @@ def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -
         # 표 한 줄도 안 나왔다면 빈 파일을 올려 심의에서 조용히 누락되게 두지 않는다
         if b"|" not in content:
             raise UploadRejected(f"{original}: 엑셀에서 읽을 데이터가 없습니다 (빈 시트이거나 계산값 미저장)")
+        if len(content) <= INLINE_MAX_BYTES:
+            inline = content.decode("utf-8")
 
     r = requests.post(
         f"{WRKS_BASE_URL}/v2/files",
@@ -145,7 +175,10 @@ def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -
     if not data:  # 2xx인데 data가 없는 응답도 실측된다 — 통짜 에러로 새지 않게 여기서 잡는다
         logger.warning("업로드 응답에 data 없음: %s %s", original, r.text[:300])
         raise UploadRejected(f"{original}: 업로드에 실패했습니다")
-    return data
+    # 엑셀은 md로 바뀌며 이름·크기가 달라진다 — 화면이 변환 과정을 그대로 보여줄 수 있게 원본도 싣는다
+    data["size"] = len(content)
+    data["original"] = original
+    return data, inline
 
 
 def _post_chat_stream(url: str, body: dict):
@@ -256,20 +289,23 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
     """
     try:
         has_files = bool(files)
+        # 답변 길이를 지시하지 않는다 — "'네'라고만 답해" 같은 지시는 다음 턴까지 이어져
+        # 정작 사용자의 질문에도 "네."로만 답해버린다(실측 회귀).
         first_message = "자료를 첨부할게" if has_files else message
         chat_id = None
 
         events = wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream", first_message)
         if has_files:
-            for evt in events:  # 자리표시자 답변 본문은 버리지만 에러까지 버리면 원인이 사라진다
+            # 자리표시자 답변 본문은 버리지만 스트림은 턴이 끝날 때까지 읽어야 한다.
+            # 실측: meta만 받고 중도에 끊으면 웍스는 그 대화의 턴을 계속 진행 중으로 붙들고,
+            # 같은 chatId 업로드가 10초 뒤 504로 막힌다(끝까지 읽으면 0.7초에 201).
+            for evt in events:
                 if evt["type"] == "error":
                     yield ndjson(evt)
                     continue
                 if evt["type"] == "meta":
                     chat_id = evt["chatId"]
                     yield ndjson(evt)
-                    break
-            events.close()  # 남은 자리표시자 스트림은 안 읽고 끊는다
         else:
             yield ndjson({"type": "turn-start"})
             for evt in events:
@@ -285,9 +321,10 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
 
         image_file_ids = []
         uploaded_names = []
+        inline_docs = []
         for filename, content, content_type in files:
             try:
-                data = upload_one(chat_id, filename, content, content_type)
+                data, inline = upload_one(chat_id, filename, content, content_type)
             except UploadRejected as e:
                 # 한 파일이 거절돼도 나머지는 진행하되, 어떤 파일이 왜 빠졌는지는 알린다
                 yield ndjson({"type": "file-error", "message": str(e)})
@@ -295,6 +332,8 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
             if data.get("imageUrl"):  # 이미지 응답에만 있다 = 대화에 안 묶였다는 뜻
                 image_file_ids.append(data["fileId"])
             uploaded_names.append(data.get("filename", filename))
+            if inline:
+                inline_docs.append((data.get("filename", filename), inline))
             yield ndjson({"type": "file-uploaded", "file": data})
 
         if has_files:
@@ -302,7 +341,12 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
                 # 에이전트는 컨텍스트에 파일 표시가 없으면 검색을 시도조차 안 한다(실측).
                 # 어떤 파일이 첨부됐는지 질문에 명시해 문서 검색을 유도한다.
                 message = f"[첨부 자료 {len(uploaded_names)}건: {', '.join(uploaded_names)} — 이 대화에 업로드되어 있으니 문서 검색으로 반드시 조회할 것]\n\n{message}"
-                time.sleep(INDEX_SETTLE_SECONDS)
+                if inline_docs:
+                    # 원문을 실은 자료는 검색이 필요 없다 — 조각 누락으로 자료를 못 읽는 일이 사라진다
+                    body = "\n\n".join(f"### {name} 원문\n{text}" for name, text in inline_docs)
+                    message = f"{message}\n\n---\n[아래는 첨부 자료 원문이다. 검색 없이 이 내용을 그대로 쓸 것]\n\n{body}"
+                if len(inline_docs) < len(uploaded_names):
+                    time.sleep(INDEX_SETTLE_SECONDS)  # 검색에 기대는 자료가 남았을 때만 기다린다
             yield ndjson({"type": "turn-start"})
             for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message, image_file_ids):
                 yield ndjson(evt)

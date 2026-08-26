@@ -3,6 +3,8 @@
 #  2) 이미지가 imageFileIds로 전달되는지 (안 그러면 모델이 이미지를 못 본다)
 #  3) 미지원 엑셀이 .md로 변환돼 올라가는지
 #  4) 거절된 파일이 file-error로 보고되고 나머지는 계속 진행되는지
+#  5) 자리표시자 턴을 끝까지 읽고 나서 업로드하는지 (중도 절단 시 웍스가 504로 막는다)
+#  6) 작은 엑셀 변환본이 질문에 원문 그대로 실리는지 (검색 조각 누락으로 자료를 못 읽던 회귀)
 import io
 import json
 
@@ -12,6 +14,8 @@ from openpyxl import Workbook
 
 chat_bodies = []
 uploads = []
+read_lines = []
+first_upload_at = []  # 업로드 시점에 자리표시자 스트림을 어디까지 읽었는지 기록
 
 
 class FakeResp:
@@ -31,7 +35,9 @@ class FakeResp:
         return self._data
 
     def iter_lines(self):
-        return iter(self._lines)
+        for line in self._lines:
+            read_lines.append(line)  # 어디까지 읽고 끊었는지 기록 (중도 절단 감지용)
+            yield line
 
 
 def fake_post(url, **kwargs):
@@ -40,6 +46,7 @@ def fake_post(url, **kwargs):
         # 닫힌 파일이면 여기서 read of closed file이 났었다 — bytes여야 한다
         assert isinstance(content, bytes), f"bytes가 아님: {type(content)}"
         uploads.append((name, content, ctype))
+        first_upload_at.append(len(read_lines))
         if name.endswith(".png"):
             return FakeResp(201, {"data": {"fileId": 7, "filename": name, "imageUrl": "https://img/x.png"}})
         if name.endswith(".zip"):  # 웍스가 415로 거절하는 형식
@@ -104,5 +111,13 @@ assert not any(u[0].endswith(".xlsx") for u in uploads), "xlsx가 그대로 업�
 # 4) 거절된 파일만 file-error 로 보고되고 나머지는 진행
 errs = [e["message"] for e in events if e["type"] == "file-error"]
 assert len(errs) == 1 and errs[0].startswith("junk.zip"), f"file-error 이상: {errs}"
+
+# 6) 엑셀 원문이 질문에 실려야 한다 — pdf처럼 변환하지 않는 자료는 실리지 않는다
+assert "### model.md 원문" in review_body["message"], "엑셀 원문이 질문에 안 실림"
+assert "EBITDA" in review_body["message"], "엑셀 표 내용이 질문에 안 실림"
+assert "im.pdf 원문" not in review_body["message"], "변환 대상이 아닌 파일이 실렸다"
+
+# 5) 첫 업로드 전에 자리표시자 스트림이 끝까지 읽혀 있어야 한다
+assert first_upload_at[0] >= 4, f"자리표시자 턴을 끝까지 읽기 전에 업로드했다 — {first_upload_at[0]}/4줄 (504 회귀)"
 
 print("OK:", types)
