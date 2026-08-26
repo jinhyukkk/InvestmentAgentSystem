@@ -14,7 +14,7 @@ function formatSize(bytes) {
 
 // 에러만 오고 끝난 턴은 빈 말풍선을 남기면 안 된다 — 실제로 담긴 게 있는지 본다.
 function hasContent(m) {
-  return !!(m && (m.message || m.reasoning || m.toolCalls.length));
+  return !!(m && (m.blocks.length || m.reasoning));
 }
 
 function formatElapsed(sec) {
@@ -190,7 +190,9 @@ export default function RequestScreen() {
         }
       });
     } catch (e) {
-      pushErrorMessage("요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+      // 스트림이 중간에 끊기면 서버 로그엔 아무 흔적도 안 남는다 — 콘솔에라도 원인을 남긴다.
+      console.error("[review-stream]", e);
+      pushErrorMessage("응답을 받는 중 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
       setLiveMessage(null);
@@ -228,7 +230,9 @@ export default function RequestScreen() {
         }
       });
     } catch (e) {
-      pushErrorMessage("요청 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+      // 스트림이 중간에 끊기면 서버 로그엔 아무 흔적도 안 남는다 — 콘솔에라도 원인을 남긴다.
+      console.error("[review-stream]", e);
+      pushErrorMessage("응답을 받는 중 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
       setLiveMessage(null);
