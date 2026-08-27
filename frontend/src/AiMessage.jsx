@@ -10,6 +10,7 @@ const styles = {
   toolHeader: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "#3A4656", background: "#F2F4F7", border: `1px solid ${colors.border}`, padding: "5px 10px", borderRadius: 8, cursor: "pointer", fontFamily: "inherit", alignSelf: "flex-start" },
   toolOutput: { fontSize: 11.5, color: colors.text, background: "#F7F9FB", border: `1px solid ${colors.borderLight}`, borderRadius: 8, padding: "10px 12px", marginTop: 6, maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", lineHeight: 1.6, fontFamily: "inherit" },
   toggle: { fontSize: 11.5, color: colors.textMuted, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 4 },
+  waiting: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 11.5, color: colors.textMuted, alignSelf: "flex-start", padding: "2px 2px" },
   reasoning: { fontSize: 11.5, color: colors.textMuted, background: "#F9FAFB", border: `1px solid ${colors.borderLight}`, borderRadius: 8, padding: "10px 12px", marginTop: 6, lineHeight: 1.6, whiteSpace: "pre-wrap" },
 };
 
@@ -76,6 +77,10 @@ export default function AiMessage({ data, streaming }) {
   const lastTextIndex = blocks.map((b) => b.type).lastIndexOf("text");
   // 마지막 블록이 추론이면 아직 답변 전이라는 뜻 — 그 블록 자리에서 "생각 중"을 보여준다.
   const thinkingAtEnd = streaming && blocks[lastIndex]?.type === "reasoning";
+  const last = blocks[lastIndex];
+  // 업로드·도구가 끝나고 다음 응답을 기다리는 사이엔 움직이는 게 하나도 없어 멈춘 것처럼 보인다.
+  // 답변 글자가 흐르기 시작할 때까지 "처리 중"을 이어 붙여 진행 중이라는 걸 계속 보여준다.
+  const waiting = streaming && (!last || (last.type === "tool" && last.output !== undefined));
 
   return (
     <div style={styles.stack}>
@@ -95,6 +100,13 @@ export default function AiMessage({ data, streaming }) {
             <Markdown className="md-content" text={b.text + (streaming && i === lastTextIndex ? " ▌" : "")} />
           </div>
         )
+      )}
+
+      {waiting && (
+        <div style={styles.waiting}>
+          에이전트가 처리 중입니다
+          <span className="typing-dots"><span /><span /><span /></span>
+        </div>
       )}
 
       {data.usage && (

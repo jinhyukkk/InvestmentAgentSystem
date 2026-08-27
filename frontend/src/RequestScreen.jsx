@@ -152,12 +152,14 @@ export default function RequestScreen() {
 
     let live = null;
     let uploadedCount = 0;
+    const uploadLines = [];
 
     // 자료 변환·업로드도 에이전트가 하는 일이므로 도구 호출과 같은 모양으로 보여준다.
+    // 파일이 몇 개든 블록은 하나 — 여러 개 첨부해도 화면이 업로드 블록으로 도배되지 않는다.
     if (hasFiles) {
       live = {
         ...newLiveMessage(),
-        blocks: files.map((f, i) => ({ type: "tool", id: `upload-${i}`, client: "자료", name: "파일 변환·업로드" })),
+        blocks: [{ type: "tool", id: "upload", client: "자료", name: `파일 변환·업로드 ${files.length}건` }],
       };
       setLiveMessage(live);
     }
@@ -189,10 +191,12 @@ export default function RequestScreen() {
         // 거절된 파일도 세어야 한다 — 안 그러면 "자료 업로드" 단계가 영영 안 끝난다.
         if (evt.type === "file-uploaded" || evt.type === "file-error") {
           if (evt.type === "file-error") pushErrorMessage(evt.message);
-          // 해당 파일의 업로드 블록을 결과로 채운다 — 결과가 없으면 화면이 영영 "실행 중"에 멎는다
+          uploadLines.push(evt.type === "file-error" ? `⚠️ ${evt.message}` : describeUpload(evt.file));
+          // 결과는 한 블록 안에 줄로 쌓고, 전부 끝나야 "실행 중"이 풀린다.
+          // 결과를 끝내 채우지 않으면 화면이 영영 "실행 중"에 멎으므로 마지막 파일에서 반드시 채운다.
           if (live) {
-            const output = evt.type === "file-error" ? `⚠️ ${evt.message}` : describeUpload(evt.file);
-            live = { ...live, blocks: live.blocks.map((b) => (b.id === `upload-${uploadedCount}` ? { ...b, output } : b)) };
+            const output = uploadLines.length === files.length ? uploadLines.join("\n") : undefined;
+            live = { ...live, blocks: live.blocks.map((b) => (b.id === "upload" ? { ...b, output } : b)) };
             setLiveMessage(live);
           }
           // 엑셀은 서버에서 md로 변환돼 올라간다 — 배지를 실제 올라간 이름·크기로 바꾼다.
