@@ -235,7 +235,7 @@ export default function RequestScreen() {
     } catch (e) {
       // 스트림이 중간에 끊기면 서버 로그엔 아무 흔적도 안 남는다 — 콘솔에라도 원인을 남긴다.
       console.error("[review-stream]", e);
-      pushErrorMessage("응답을 받는 중 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.");
+      pushErrorMessage(e.offline ? e.message : "응답을 받는 중 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
       setLiveMessage(null);
@@ -275,7 +275,7 @@ export default function RequestScreen() {
     } catch (e) {
       // 스트림이 중간에 끊기면 서버 로그엔 아무 흔적도 안 남는다 — 콘솔에라도 원인을 남긴다.
       console.error("[review-stream]", e);
-      pushErrorMessage("응답을 받는 중 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.");
+      pushErrorMessage(e.offline ? e.message : "응답을 받는 중 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
       setLiveMessage(null);
