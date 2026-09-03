@@ -175,9 +175,30 @@ follow_body = chat_bodies[-1]
 assert REPORT_INSTRUCTION in follow_body["message"], "후속 메시지에 출력 규칙이 안 붙음"
 assert follow_body["message"].startswith("2번안으로 진행해줘"), f"사용자 메시지가 앞에 와야 함: {follow_body['message'][:40]}"
 follow_turns = db.get_review(meta["reviewId"])["turns"]
-assert follow_turns[-1]["role"] == "user" or follow_turns[-2]["role"] == "user"
+# 안건 생성(user) → 최초 ai 응답 → 이번 후속 사용자 메시지(user) → 후속 ai 응답 순서가 그대로 저장돼야 한다
+assert [t["role"] for t in follow_turns] == ["user", "ai", "user", "ai"], f"턴 순서 이상: {[t['role'] for t in follow_turns]}"
 user_texts = [t["payload"]["text"] for t in follow_turns if t["role"] == "user"]
 assert user_texts[-1] == "2번안으로 진행해줘", f"저장된 사용자 턴에 출력 규칙이 섞였다: {user_texts[-1][:60]}"
+
+# 11) 저장 조회(find_review_id)가 DB 장애로 예외를 던져도 후속 메시지는 계속 스트리밍돼야 한다
+# (진행 중인 심의가 저장 장애로 못 쓰게 되면 안 된다는 핵심 보장)
+_orig_find_review_id = main.db.find_review_id
+
+
+def _boom(chat_id):
+    raise Exception("DB 다운 시뮬레이션")
+
+
+main.db.find_review_id = _boom
+try:
+    resp_db_down = client.post("/api/review/c1/message", data={"message": "DB 죽어도 계속"})
+finally:
+    main.db.find_review_id = _orig_find_review_id
+assert resp_db_down.status_code == 200, f"DB 장애 시 후속 메시지가 실패함: {resp_db_down.status_code} {resp_db_down.text[:200]}"
+db_down_events = [json.loads(line) for line in resp_db_down.text.strip().splitlines()]
+db_down_types = [e["type"] for e in db_down_events]
+assert "error" not in db_down_types, f"error 이벤트 발생(DB 장애): {db_down_events}"
+assert "text-delta" in db_down_types, f"정상 스트림이 아님(DB 장애): {db_down_events}"
 
 # 9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행돼야 한다
 # (저장이 실패해 안건 행이 없는 대화라도, 사용자가 보고 있는 심의는 계속 쓸 수 있어야 한다)

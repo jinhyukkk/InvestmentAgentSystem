@@ -47,6 +47,11 @@ def test_score():
         ('{"total_score": 130, "company": "대성정밀"}', "범위 밖"),
         ('{"total_score": true, "company": "대성정밀"}', "불린"),
         ('{"company": "대성정밀"}', "누락"),
+        # json.loads 는 표준 밖인 NaN/Infinity 리터럴도 float로 받고, "1e999"도 inf로 파싱된다 —
+        # int() 에 그대로 넣으면 ValueError/OverflowError 가 나 보고서 전체가 사라지던 회귀
+        ('{"total_score": NaN, "company": "대성정밀"}', "NaN"),
+        ('{"total_score": Infinity, "company": "대성정밀"}', "Infinity"),
+        ('{"total_score": 1e999, "company": "대성정밀"}', "1e999"),
     ):
         r = extract_report(f"```json\n{block}\n```")
         assert r is not None, f"{label} 점수 때문에 보고서 전체가 버려짐"
@@ -56,7 +61,18 @@ def test_score():
 
 def test_schema_echo():
     # 스키마 예시를 그대로 되돌려주면 "안건명(회사명 또는 자산명)" 같은 자리표시자가 실데이터로 저장된다
+    # (enum 필드 3개가 전부 " | " 선택지 문법이라 통째 폐기)
     assert extract_report(f"```json\n{REPORT_SCHEMA}\n```") is None
+
+
+def test_schema_echo_single_field_hedge():
+    # enum 필드 하나만 "M&A | 실물자산" 처럼 스키마 선택지를 얼버무린 경우는 모델이 그 필드만
+    # 확신 못한 헤징일 뿐 나머지는 실데이터일 수 있다 — 그 필드만 null 처리하고 보고서는 살린다
+    block = '{"total_score": 82, "company": "대성정밀", "asset_type": "M&A | 실물자산", "review_level": "본심의"}'
+    r = extract_report(f"```json\n{block}\n```")
+    assert r is not None, "필드 하나의 헤징 때문에 보고서 전체가 버려짐"
+    assert r["asset_type"] is None, "헤징된 필드는 null 이어야 함"
+    assert r["company"] == "대성정밀" and r["review_level"] == "본심의", "헤징과 무관한 필드는 보존돼야 함"
 
 
 def test_last_block_wins():
@@ -88,6 +104,7 @@ if __name__ == "__main__":
     test_broken()
     test_score()
     test_schema_echo()
+    test_schema_echo_single_field_hedge()
     test_last_block_wins()
     test_no_newline_before_close()
     print("test_report OK")

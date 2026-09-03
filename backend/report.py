@@ -1,6 +1,7 @@
 """에이전트 최종 보고서 끝에 붙는 ```json 블록을 구조화 데이터로 뽑는다."""
 import json
 import logging
+import math
 import re
 
 logger = logging.getLogger("investment-proxy")
@@ -68,6 +69,10 @@ def _coerce_score(value) -> int | None:
             return None
     if not isinstance(value, (int, float)):
         return None
+    # json.loads 는 표준 밖 리터럴 NaN·Infinity 도 float로 파싱하고, "1e999" 도 inf 로 파싱된다.
+    # 둘 다 int() 에 넣으면 ValueError/OverflowError 가 그대로 튀어 나가 보고서 전체가 날아간다.
+    if not math.isfinite(value):
+        return None
     score = int(value)
     return score if 0 <= score <= 100 else None
 
@@ -91,12 +96,16 @@ def extract_report(text: str | None) -> dict | None:
         logger.warning("보고서 json 블록이 객체가 아님: %s", blocks[-1][:200])
         return None
     # 스키마 예시를 그대로 되돌려준 경우("M&A | 실물자산 | 그린필드" 같은 선택지 문법이 값에 남아있다).
-    # 이대로 통과시키면 자리표시자 문구가 실데이터로 저장돼 모든 화면에 그대로 뜬다.
-    for key, _ in _ENUM_FIELDS:
-        value = data.get(key)
-        if isinstance(value, str) and " | " in value:
-            logger.warning("스키마 예시가 그대로 회신됨 — 보고서 폐기: %s=%r", key, value)
-            return None
+    # enum 필드 하나만 이 모양이면 그 필드만 모델이 값을 못 정해 스키마를 얼버무린 것("asset_type":
+    # "M&A | 실물자산" 같은 헤징)일 뿐 나머지는 실데이터일 수 있다 — 그 필드만 null 처리한다.
+    # 2개 이상이면 스키마 자체를 통째로 베껴 쓴 것이므로 보고서 전체를 신뢰할 수 없어 폐기한다.
+    echoed = [key for key, _ in _ENUM_FIELDS if isinstance(data.get(key), str) and " | " in data[key]]
+    if len(echoed) >= 2:
+        logger.warning("스키마 예시가 그대로 회신됨 — 보고서 폐기: %s", {k: data[k] for k in echoed})
+        return None
+    for key in echoed:
+        logger.info("enum 필드가 스키마 선택지 그대로 회신됨 — 해당 필드만 null 처리: %s=%r", key, data[key])
+        data[key] = None
     score = _coerce_score(data.get("total_score"))
     if score is None:
         logger.warning("보고서 total_score 비정상 — 점수 미상으로 저장: %r", data.get("total_score"))

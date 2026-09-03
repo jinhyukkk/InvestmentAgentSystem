@@ -65,6 +65,10 @@ def actor_header() -> dict:
 
 HEADERS = {"API-KEY": API_KEY, **actor_header()}
 
+# uvicorn 로거는 propagate=False 라 루트에 안 묶이고(uvicorn.config.LOGGING_CONFIG 확인함),
+# 루트 자체는 아무도 설정하지 않아 이 로거의 info 로그가 logging.lastResort(WARNING 이상만
+# 출력)에 조용히 먹힌다 — report.py 의 "json 블록 없음" 진단이 실전에서 안 보이던 원인.
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("investment-proxy")
 
 
@@ -464,11 +468,17 @@ def continue_review(chat_id: str, message: str = Form(...)):
     저장 장애가 진행 중인 심의를 영구히 못 쓰게 만들면 안 된다는 원칙. 이 경우 저장은 건너뛴다.
     동기 def 라야 FastAPI가 스레드풀에서 돌려 db.* 동기 호출이 이벤트 루프를 막지 않는다.
     """
-    review_id = db.find_review_id(chat_id)
-    if review_id is None:
-        logger.warning("저장된 안건 없이 후속 메시지 진행 (chat=%s)", chat_id)
-    else:
-        db.add_user_turn(review_id, message)
+    try:
+        review_id = db.find_review_id(chat_id)
+        if review_id is None:
+            logger.warning("저장된 안건 없이 후속 메시지 진행 (chat=%s)", chat_id)
+        else:
+            db.add_user_turn(review_id, message)
+    except Exception:
+        # DB가 죽어 있으면 여기서 500을 내버리는 순간 진행 중이던 심의가 못 쓰게 된다 —
+        # 안건 없이 이어가는 orphan 경로와 동일하게 review_id=None 으로 릴레이만 계속한다
+        logger.exception("후속 메시지 저장 조회 실패 — 안건 없이 진행 (chat=%s)", chat_id)
+        review_id = None
     events = record(stream_continue(chat_id, message), message, [], review_id)
     return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")
 

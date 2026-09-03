@@ -62,6 +62,19 @@ def test_ai_turn_fills_report():
     assert db.get_review(rid)["aiScore"] == 82
 
 
+def test_ai_turn_fills_report_unknown_score():
+    # total_score 가 이상해도(점수 미상) 보고서 자체는 저장되고 안건은 '심의 대기'로 넘어가야 한다 —
+    # 점수 하나 때문에 안건이 '검토 중'에 영원히 묶이던 회귀 방지
+    reset()
+    rid = db.create_review("chat-2b", "검토", [])
+    bad_score_report = REPORT.replace('"total_score": 82', '"total_score": 130')
+    db.save_ai_turn(rid, ai_turn(bad_score_report))
+    d = db.get_review(rid)
+    assert d["status"] == "심의 대기", "점수 미상이어도 심의 대기로 넘어가야 함"
+    assert d["aiScore"] is None
+    assert d["company"] == "대성정밀", "점수 미상이어도 나머지 보고서는 저장돼야 함"
+
+
 def test_manual_edit_wins():
     reset()
     rid = db.create_review("chat-3", "검토", [])
@@ -179,6 +192,7 @@ def test_http_list_detail_patch():
 if __name__ == "__main__":
     test_create_and_list()
     test_ai_turn_fills_report()
+    test_ai_turn_fills_report_unknown_score()
     test_manual_edit_wins()
     test_delta_coalesced()
     test_empty_turn_not_saved()
