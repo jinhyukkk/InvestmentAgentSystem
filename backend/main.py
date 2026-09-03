@@ -11,6 +11,8 @@ import logging
 import os
 import time
 
+from contextlib import asynccontextmanager
+
 from typing import Literal
 
 import requests
@@ -63,7 +65,24 @@ def actor_header() -> dict:
 
 HEADERS = {"API-KEY": API_KEY, **actor_header()}
 
-app = FastAPI(title="투자심의 에이전트 프록시")
+logger = logging.getLogger("investment-proxy")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """DB가 죽어 있어도 앱은 뜬다 — 저장만 degrade 되고 심의는 계속 진행돼야 한다.
+
+    import 시점에 create_all 을 부르면 PostgreSQL 이 내려간 순간 uvicorn 자체가 기동에
+    실패해, 스트리밍 쪽에서 공들여 지킨 "저장 장애가 심의를 끊지 않는다" 원칙이 무너진다.
+    """
+    try:
+        db.init_db()
+    except Exception:
+        logger.exception("DB 초기화 실패 — 이력 저장 없이 기동합니다")
+    yield
+
+
+app = FastAPI(title="투자심의 에이전트 프록시", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -71,14 +90,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-db.init_db()
-
-
 def ndjson(obj) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-
-
-logger = logging.getLogger("investment-proxy")
 
 
 def friendly_error(e: Exception) -> str:
@@ -413,9 +426,17 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
 
 
 def stream_continue(chat_id: str, message: str):
+    """후속 메시지. 출력 규칙은 매 턴 다시 붙인다.
+
+    규칙 자체가 "중간 단계 답변에는 붙이지 말 것"이라 실제 보고서는 첫 턴이 아니라 뒤쪽 턴에서
+    나온다 — 첫 메시지에만 붙이면 정작 보고서를 내는 턴에서는 규칙이 오래된 컨텍스트가 된다.
+    추출은 마지막 json 블록을 쓰므로 여러 번 붙어도 무해하다.
+    DB에 남는 사용자 턴은 규칙이 빠진 원문이어야 한다(대화 이력 화면이 그대로 보여준다) —
+    그래서 저장은 호출부(continue_review)에서 원문으로 먼저 하고, 여기서는 상류로 보낼 때만 붙인다.
+    """
     try:
         yield {"type": "turn-start"}
-        for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message):
+        for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", f"{message}\n\n{REPORT_INSTRUCTION}"):
             yield evt
         yield {"type": "turn-end"}
     except Exception as e:

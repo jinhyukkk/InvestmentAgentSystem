@@ -15,8 +15,22 @@ async function request(url, init) {
   } catch (e) {
     throw offlineError(e);
   }
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await errorMessage(res));
   return res;
+}
+
+// FastAPI 는 오류를 {"detail": ...} 로 준다. 그대로 던지면 alert 에 raw JSON(422 검증 배열 등)이
+// 뜬다 — 사람이 읽을 부분만 뽑고, 모양이 다르면 원문을 그대로 쓴다.
+async function errorMessage(res) {
+  const body = await res.text();
+  try {
+    const { detail } = JSON.parse(body);
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) return detail.map((d) => d?.msg || JSON.stringify(d)).join(", ");
+  } catch {
+    // JSON 이 아니면 아래에서 원문 그대로
+  }
+  return body;
 }
 
 // 백엔드가 NDJSON(줄 단위 JSON)으로 실시간 이벤트를 흘려보내면, 도착하는 즉시 onEvent로 넘긴다.

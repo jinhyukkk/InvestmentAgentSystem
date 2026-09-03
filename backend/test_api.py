@@ -4,6 +4,8 @@
 #  3) 사람이 접수 정보를 고친 뒤에는 AI 재파싱이 덮어쓰지 않는지
 #  4) 위원회 결정 입력 → '완료', 해제 → '심의 대기'
 #  5) created_at 이 UTC 로 저장돼도 날짜는 한국 시간(KST) 기준으로 나오는지
+#  6) 저장 시 연속된 delta 가 하나로 합쳐지고, 합친 뒤 재생 결과가 원본과 같은지
+#  7) 그릴 게 없는 빈 턴은 아예 저장되지 않는지
 import os
 
 os.environ["WRKS_API_KEY"] = "test"
@@ -71,6 +73,57 @@ def test_manual_edit_wins():
     assert d["aiScore"] == 70, "점수·보고서는 계속 갱신된다"
 
 
+def replay(events):
+    """frontend streamReducer.appendDelta 와 같은 규칙으로 블록을 만든다 (재생 동일성 확인용)."""
+    kinds = {"text-delta": "text", "reasoning-delta": "reasoning"}
+    blocks = []
+    for e in events:
+        kind = kinds.get(e["type"])
+        if kind is None:
+            if e["type"].startswith("tool-"):
+                blocks.append(("tool", e.get("toolCallId")))
+            continue
+        if blocks and blocks[-1][0] == kind:
+            blocks[-1] = (kind, blocks[-1][1] + (e.get("delta") or ""))
+        else:
+            blocks.append((kind, e.get("delta") or ""))
+    return blocks
+
+
+def test_delta_coalesced():
+    reset()
+    rid = db.create_review("chat-6", "검토", [])
+    raw = [
+        {"type": "reasoning-delta", "id": "r1", "delta": "생각"},
+        {"type": "reasoning-delta", "id": "r1", "delta": "중"},
+        {"type": "text-delta", "id": "1", "delta": "답"},
+        {"type": "tool-input-available", "toolCallId": "t1", "toolName": "search"},
+        {"type": "text-delta", "id": "2", "delta": "변"},
+        {"type": "text-delta", "id": "2", "delta": "!"},
+        {"type": "finish", "finishReason": "stop"},
+    ]
+    db.save_ai_turn(rid, raw)
+    saved = db.get_review(rid)["turns"][-1]["payload"]
+    assert [e["type"] for e in saved] == [
+        "reasoning-delta",
+        "text-delta",
+        "tool-input-available",
+        "text-delta",
+        "finish",
+    ], f"연속 delta 가 합쳐지지 않음: {[e['type'] for e in saved]}"
+    assert saved[0]["delta"] == "생각중"
+    assert saved[3]["delta"] == "변!"
+    assert replay(saved) == replay(raw), "합친 뒤 재생 결과가 달라졌다"
+
+
+def test_empty_turn_not_saved():
+    reset()
+    rid = db.create_review("chat-7", "검토", [])
+    db.save_ai_turn(rid, [])
+    db.save_ai_turn(rid, [{"type": "finish", "finishReason": "error"}, {"type": "text-delta", "delta": ""}])
+    assert [t["role"] for t in db.get_review(rid)["turns"]] == ["user"], "빈 ai 턴이 저장됐다 (빈 말풍선)"
+
+
 def test_kst_date_boundary():
     # db._date() 를 직접 호출한다: DB 서버 세션 타임존이 이미 Asia/Seoul 이면
     # list_reviews() 왕복만으로는 UTC .date() 버그가 가려져 버려서 검증이 안 된다.
@@ -127,6 +180,8 @@ if __name__ == "__main__":
     test_create_and_list()
     test_ai_turn_fills_report()
     test_manual_edit_wins()
+    test_delta_coalesced()
+    test_empty_turn_not_saved()
     test_kst_date_boundary()
     test_committee_status()
     test_http_list_detail_patch()

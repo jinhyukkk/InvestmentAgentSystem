@@ -4,7 +4,9 @@
 #  3) 깨진 json / total_score 범위 밖이면 None
 #  4) 블록이 여러 개면 마지막 것을 쓰는지
 #  5) 닫는 ``` 앞에 개행이 없어도(한 줄짜리 블록 등) 추출되는지
-from report import extract_report
+#  6) total_score 가 문자열·실수면 정수로 보정되고, 없거나 범위 밖·불린이면 점수만 미상으로 두고 본문은 살리는지
+#  7) 스키마 예시를 그대로 되돌려준 블록은 실데이터로 받지 않는지
+from report import REPORT_SCHEMA, extract_report
 
 GOOD = """보고서 본문입니다.
 
@@ -30,10 +32,31 @@ def test_missing():
 
 
 def test_broken():
+    # 파싱 불가·dict 아님만 폐기한다. 점수 이상은 아래 test_score 참고(보고서는 살린다)
     assert extract_report("```json\n{broken\n```") is None
-    assert extract_report('```json\n{"total_score": 130}\n```') is None
-    assert extract_report('```json\n{"total_score": true}\n```') is None
     assert extract_report('```json\n[1, 2]\n```') is None
+
+
+def test_score():
+    # 숫자 문자열·실수는 정수로 보정
+    assert extract_report('```json\n{"total_score": "82"}\n```')["total_score"] == 82
+    assert extract_report('```json\n{"total_score": 82.5}\n```')["total_score"] == 82
+    # 점수를 알 수 없어도(null·범위 밖·불린·누락) 보고서 본문은 그대로 살아야 한다
+    for block, label in (
+        ('{"total_score": null, "company": "대성정밀"}', "null"),
+        ('{"total_score": 130, "company": "대성정밀"}', "범위 밖"),
+        ('{"total_score": true, "company": "대성정밀"}', "불린"),
+        ('{"company": "대성정밀"}', "누락"),
+    ):
+        r = extract_report(f"```json\n{block}\n```")
+        assert r is not None, f"{label} 점수 때문에 보고서 전체가 버려짐"
+        assert r["total_score"] is None, f"{label} 은 점수 미상이어야 함"
+        assert r["company"] == "대성정밀", f"{label}: 나머지 필드는 보존돼야 함"
+
+
+def test_schema_echo():
+    # 스키마 예시를 그대로 되돌려주면 "안건명(회사명 또는 자산명)" 같은 자리표시자가 실데이터로 저장된다
+    assert extract_report(f"```json\n{REPORT_SCHEMA}\n```") is None
 
 
 def test_last_block_wins():
@@ -63,6 +86,8 @@ if __name__ == "__main__":
     test_good()
     test_missing()
     test_broken()
+    test_score()
+    test_schema_echo()
     test_last_block_wins()
     test_no_newline_before_close()
     print("test_report OK")

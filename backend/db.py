@@ -108,12 +108,44 @@ def add_file(review_id: int, file: dict) -> None:
         s.commit()
 
 
+DELTA_TYPES = ("text-delta", "reasoning-delta")
+RENDERABLE_TYPES = ("tool-input-available", "tool-output-available", "tool-output-error")
+
+
+def _coalesce(events: list[dict]) -> list[dict]:
+    """연속된 같은 종류의 delta 를 하나로 합친다.
+
+    한 턴은 토큰마다 이벤트 하나라 15분짜리 심의면 턴 하나가 수 MB가 되고, 상세 화면은
+    그걸 전부 받아 매 렌더마다 되감는다. 프론트 appendDelta 가 어차피 연속된 같은 종류
+    delta 를 이어 붙이므로, 미리 합쳐 저장해도 재생 결과는 동일하다(순서·다른 타입은 보존).
+    """
+    out: list[dict] = []
+    for e in events:
+        t = e.get("type")
+        if t in DELTA_TYPES and out and out[-1].get("type") == t:
+            out[-1] = {**out[-1], "delta": (out[-1].get("delta") or "") + (e.get("delta") or "")}
+            continue
+        out.append(e)
+    return out
+
+
+def _renderable(events: list[dict]) -> bool:
+    """화면에 뭐라도 그려지는 이벤트가 있는지. 없으면 이력에 빈 말풍선만 남는다."""
+    return any(
+        (e.get("type") in DELTA_TYPES and e.get("delta")) or e.get("type") in RENDERABLE_TYPES for e in events
+    )
+
+
 def save_ai_turn(review_id: int, events: list[dict]) -> None:
     """ai 턴 원본 이벤트를 저장하고, 보고서 json 블록이 있으면 안건 필드를 채운다."""
+    if not _renderable(events):
+        # 실패한 턴(finish 만 오거나 아예 빈 경우)을 저장하면 대화 이력에 빈 말풍선이 남는다
+        logger.info("그릴 내용이 없는 ai 턴은 저장하지 않음 (review=%s, 이벤트 %d건)", review_id, len(events))
+        return
     text = "".join(e.get("delta") or "" for e in events if e.get("type") == "text-delta")
     report = extract_report(text)
     with Session(engine) as s:
-        s.add(Turn(review_id=review_id, role="ai", payload_json=events))
+        s.add(Turn(review_id=review_id, role="ai", payload_json=_coalesce(events)))
         if report:
             r = s.get(Review, review_id)
             if not r:
@@ -121,7 +153,7 @@ def save_ai_turn(review_id: int, events: list[dict]) -> None:
                 logger.warning("save_ai_turn: 존재하지 않는 review_id=%s", review_id)
                 s.commit()
                 return
-            r.ai_score = report["total_score"]
+            r.ai_score = report.get("total_score")  # 점수 미상이면 None — 보고서 자체는 저장한다
             r.ai_rec = report.get("recommendation")
             r.report_json = report
             r.reported_at = r.reported_at or now()

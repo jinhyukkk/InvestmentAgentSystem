@@ -8,6 +8,7 @@
 #  7) 출력 규칙(REPORT_INSTRUCTION)이 실제 심의 질문에만 붙는지 (자리표시자에는 X)
 #  8) meta 에 reviewId 가 실리고 안건·파일·ai 턴이 저장되는지
 #  9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행되는지
+# 10) 후속 메시지에도 출력 규칙이 붙되, 저장되는 사용자 턴에는 안 섞이는지
 import io
 import json
 import os
@@ -22,6 +23,9 @@ from sqlalchemy import text
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from itertools import count
+
+chat_ids = count(1)
 chat_bodies = []
 uploads = []
 read_lines = []
@@ -64,10 +68,13 @@ def fake_post(url, **kwargs):
         return FakeResp(201, {"data": {"fileId": 8, "filename": name}})
 
     chat_bodies.append(kwargs["json"])
+    # 대화마다 다른 chatId — 전부 "c1" 이면 뒤쪽 심의가 같은 chat_id 로 저장되며 UNIQUE 위반이
+    # 나고, 그 트레이스백이 통과한 테스트 출력에 섞여 "실패한 것처럼" 보인다.
+    chat_id = f"c{next(chat_ids)}"
     return FakeResp(
         200,
         lines=[
-            b'data: {"type":"chat-id","chatId":"c1"}',
+            b'data: {"type":"chat-id","chatId":"%s"}' % chat_id.encode(),
             b'data: {"type":"text-delta","id":"1","delta":"ok"}',
             b'data: {"type":"finish","finishReason":"stop"}',
             b"data: [DONE]",
@@ -87,8 +94,9 @@ def make_xlsx() -> bytes:
 
 main.requests.post = fake_post
 
-# 매 실행이 같은 chatId("c1")를 쓰므로 비우고 시작해야 UNIQUE 위반 없이 저장까지 검증된다
+# 매 실행이 같은 chatId("c1", "c2"…)를 쓰므로 비우고 시작해야 UNIQUE 위반 없이 저장까지 검증된다
 assert db.DATABASE_URL.endswith("_test"), f"테스트 DB가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
+db.init_db()  # 앱 기동(lifespan)이 아니라 여기서 만든다 — TestClient 는 lifespan 을 돌리지 않는다
 with db.Session(db.engine) as s:
     s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
     s.commit()
@@ -158,6 +166,18 @@ roles = [t["role"] for t in detail["turns"]]
 assert roles == ["user", "ai"], f"턴 저장 이상 (자리표시자가 새어 들어갔는지 확인): {roles}"
 assert detail["turns"][0]["payload"]["text"] == "이 IM 분석해줘", "사용자 턴은 원문 그대로 (규칙 미포함)"
 assert any(e["type"] == "text-delta" for e in detail["turns"][1]["payload"]), "ai 턴 이벤트 미저장"
+
+# 10) 후속 메시지에도 출력 규칙이 붙어야 한다 — 규칙상 보고서는 중간 턴이 아니라 뒤쪽 턴에서 나오므로
+# 첫 메시지에만 붙이면 정작 보고서를 내는 턴에 규칙이 없다. 단, 저장되는 사용자 턴은 원문 그대로여야 한다.
+resp_follow = client.post("/api/review/c1/message", data={"message": "2번안으로 진행해줘"})
+assert resp_follow.status_code == 200, f"후속 메시지 실패: {resp_follow.status_code}"
+follow_body = chat_bodies[-1]
+assert REPORT_INSTRUCTION in follow_body["message"], "후속 메시지에 출력 규칙이 안 붙음"
+assert follow_body["message"].startswith("2번안으로 진행해줘"), f"사용자 메시지가 앞에 와야 함: {follow_body['message'][:40]}"
+follow_turns = db.get_review(meta["reviewId"])["turns"]
+assert follow_turns[-1]["role"] == "user" or follow_turns[-2]["role"] == "user"
+user_texts = [t["payload"]["text"] for t in follow_turns if t["role"] == "user"]
+assert user_texts[-1] == "2번안으로 진행해줘", f"저장된 사용자 턴에 출력 규칙이 섞였다: {user_texts[-1][:60]}"
 
 # 9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행돼야 한다
 # (저장이 실패해 안건 행이 없는 대화라도, 사용자가 보고 있는 심의는 계속 쓸 수 있어야 한다)

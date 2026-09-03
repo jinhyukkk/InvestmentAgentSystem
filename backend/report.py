@@ -53,10 +53,34 @@ _FENCE = re.compile(r"```json\s*\n(.*?)\n?\s*```", re.DOTALL)
 _ENUM_FIELDS = (("asset_type", ASSET_TYPES), ("review_level", REVIEW_LEVELS), ("recommendation", RECOMMENDATIONS))
 
 
+def _coerce_score(value) -> int | None:
+    """total_score 를 0~100 정수로 보정. 불린·해석 불가·범위 밖은 None(점수 미상).
+
+    모델은 "82"·82.5 같은 모양도 흔히 낸다 — 이걸로 보고서 전체를 버리면 안 된다.
+    불린은 파이썬에서 int 취급이라 명시적으로 먼저 막는다.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    score = int(value)
+    return score if 0 <= score <= 100 else None
+
+
 def extract_report(text: str | None) -> dict | None:
-    """텍스트의 마지막 ```json 블록을 dict로. 없거나 깨졌거나 total_score가 0~100 정수가 아니면 None."""
+    """텍스트의 마지막 ```json 블록을 dict로. 블록이 없거나 깨졌거나 dict가 아니면 None.
+
+    점수가 이상해도 보고서는 살린다(total_score 만 None). 점수 하나 때문에 15분짜리 심의
+    결과 전체가 사라지고 안건이 '검토 중'에 영원히 묶이던 회귀 방지.
+    """
     blocks = _FENCE.findall(text or "")
     if not blocks:
+        logger.info("최종 답변에 ```json 블록이 없어 보고서를 추출하지 못함 (본문 %d자)", len(text or ""))
         return None
     try:
         data = json.loads(blocks[-1])
@@ -64,11 +88,19 @@ def extract_report(text: str | None) -> dict | None:
         logger.warning("보고서 json 블록 파싱 실패: %s", blocks[-1][:200])
         return None
     if not isinstance(data, dict):
+        logger.warning("보고서 json 블록이 객체가 아님: %s", blocks[-1][:200])
         return None
-    score = data.get("total_score")
-    if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
-        logger.warning("보고서 total_score 비정상: %r", score)
-        return None
+    # 스키마 예시를 그대로 되돌려준 경우("M&A | 실물자산 | 그린필드" 같은 선택지 문법이 값에 남아있다).
+    # 이대로 통과시키면 자리표시자 문구가 실데이터로 저장돼 모든 화면에 그대로 뜬다.
+    for key, _ in _ENUM_FIELDS:
+        value = data.get(key)
+        if isinstance(value, str) and " | " in value:
+            logger.warning("스키마 예시가 그대로 회신됨 — 보고서 폐기: %s=%r", key, value)
+            return None
+    score = _coerce_score(data.get("total_score"))
+    if score is None:
+        logger.warning("보고서 total_score 비정상 — 점수 미상으로 저장: %r", data.get("total_score"))
+    data["total_score"] = score
     for key, allowed in _ENUM_FIELDS:
         if data.get(key) not in allowed:
             data[key] = None
