@@ -52,7 +52,7 @@ export default function CaseDetail({ caseItem, onBack }) {
           </div>
           <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.03em" }}>{review.company}</div>
           <div style={{ fontSize: 13, color: colors.textMuted, marginTop: 3 }}>
-            {review.sector || "업종 미정"} · 안건번호 IC-{review.received?.slice(0, 4)}-{String(review.id).padStart(3, "0")}
+            {review.sector || "업종 미정"} · 안건번호 IC-{review.received?.slice(0, 4) || "----"}-{String(review.id).padStart(3, "0")}
           </div>
           <div style={{ display: "flex", gap: 32, marginTop: 20, flexWrap: "wrap" }}>
             {[
@@ -373,7 +373,7 @@ export default function CaseDetail({ caseItem, onBack }) {
                 <span style={{ fontSize: 10.5, color: "#9AA3AF" }}>참고용 — 위원회 의결로 대체됨</span>
               </div>
               <span style={{ display: "inline-block", fontSize: 14, fontWeight: 700, color: colors.amber, background: colors.amberBg, border: `1px solid ${colors.amberBorder}`, padding: "7px 15px", borderRadius: 8 }}>{review.aiRec || "AI 분석 전"}</span>
-              <p style={{ fontSize: 12.5, color: "#5A6473", lineHeight: 1.65, margin: "12px 0 0" }}>{detail?.recommendationReason}</p>
+              <p style={{ fontSize: 12.5, color: "#5A6473", lineHeight: 1.65, margin: "12px 0 0" }}>{detail?.recommendationReason || empty("AI 권고 사유가 아직 없습니다.")}</p>
             </div>
           </div>
           {divider}
