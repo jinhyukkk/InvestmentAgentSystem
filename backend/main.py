@@ -12,7 +12,7 @@ import os
 import time
 
 import requests
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -30,6 +30,10 @@ def load_env_file() -> None:
 
 
 load_env_file()  # AGENT_ID·API_KEY 를 읽기 전에 올려야 .env 값이 먹는다
+
+# db 는 import 시점에 DATABASE_URL 을 요구한다 — 반드시 load_env_file() 뒤에서 import 해야 한다
+import db  # noqa: E402
+from report import REPORT_INSTRUCTION  # noqa: E402
 
 WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
@@ -63,6 +67,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+db.init_db()
 
 
 def ndjson(obj) -> bytes:
@@ -279,6 +285,34 @@ def wrks_chat_events(url: str, message: str, image_file_ids: list[int] | None = 
         body = {"agentId": AGENT_ID, "approval": {"id": pending_approval_id, "approved": True}}
 
 
+def record(events, user_text: str, files_meta: list[dict], review_id: int | None = None):
+    """릴레이하면서 안건·턴을 DB에 남긴다. 저장 실패는 로그만 — 심의가 저장 장애로 끊기면 안 된다.
+
+    새 심의는 meta 에서 안건을 만들고(reviewId 를 meta 에 실음), 이어가기는 review_id 를 받아 온다.
+    turn-start~turn-end 사이 이벤트를 모아 ai 턴 하나로 저장한다.
+    """
+    buf = None
+    for evt in events:
+        try:
+            t = evt.get("type")
+            if t == "meta" and review_id is None:
+                review_id = db.create_review(evt["chatId"], user_text, files_meta)
+                evt = {**evt, "reviewId": review_id}
+            elif t == "turn-start":
+                buf = []
+            elif t == "turn-end":
+                if buf is not None and review_id is not None:
+                    db.save_ai_turn(review_id, buf)
+                buf = None
+            elif buf is not None:
+                buf.append(evt)
+            elif t == "file-uploaded" and review_id is not None:
+                db.add_file(review_id, evt["file"])
+        except Exception:
+            logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+        yield evt
+
+
 def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
     """대화 생성 → (파일이 있으면) 업로드 → 사용자 메시지 순으로 진행한다.
 
@@ -291,7 +325,8 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
         has_files = bool(files)
         # 답변 길이를 지시하지 않는다 — "'네'라고만 답해" 같은 지시는 다음 턴까지 이어져
         # 정작 사용자의 질문에도 "네."로만 답해버린다(실측 회귀).
-        first_message = "자료를 첨부할게" if has_files else message
+        # 파일이 없으면 이 첫 메시지가 곧 심의 요청이므로 출력 규칙을 여기 붙인다
+        first_message = "자료를 첨부할게" if has_files else f"{message}\n\n{REPORT_INSTRUCTION}"
         chat_id = None
 
         events = wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream", first_message)
@@ -301,22 +336,22 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
             # 같은 chatId 업로드가 10초 뒤 504로 막힌다(끝까지 읽으면 0.7초에 201).
             for evt in events:
                 if evt["type"] == "error":
-                    yield ndjson(evt)
+                    yield evt
                     continue
                 if evt["type"] == "meta":
                     chat_id = evt["chatId"]
-                    yield ndjson(evt)
+                    yield evt
         else:
-            yield ndjson({"type": "turn-start"})
+            yield {"type": "turn-start"}
             for evt in events:
                 if evt["type"] == "meta":
                     chat_id = evt["chatId"]
-                yield ndjson(evt)
-            yield ndjson({"type": "turn-end"})
+                yield evt
+            yield {"type": "turn-end"}
 
         if not chat_id:
             logger.warning("자리표시자 턴에서 chatId를 못 받음 (files=%d)", len(files))
-            yield ndjson({"type": "error", "message": "대화를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요."})
+            yield {"type": "error", "message": "대화를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요."}
             return
 
         image_file_ids = []
@@ -327,14 +362,14 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
                 data, inline = upload_one(chat_id, filename, content, content_type)
             except UploadRejected as e:
                 # 한 파일이 거절돼도 나머지는 진행하되, 어떤 파일이 왜 빠졌는지는 알린다
-                yield ndjson({"type": "file-error", "message": str(e)})
+                yield {"type": "file-error", "message": str(e)}
                 continue
             if data.get("imageUrl"):  # 이미지 응답에만 있다 = 대화에 안 묶였다는 뜻
                 image_file_ids.append(data["fileId"])
             uploaded_names.append(data.get("filename", filename))
             if inline:
                 inline_docs.append((data.get("filename", filename), inline))
-            yield ndjson({"type": "file-uploaded", "file": data})
+            yield {"type": "file-uploaded", "file": data}
 
         if has_files:
             if uploaded_names:
@@ -347,36 +382,45 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
                     message = f"{message}\n\n---\n[아래는 첨부 자료 원문이다. 검색 없이 이 내용을 그대로 쓸 것]\n\n{body}"
                 if len(inline_docs) < len(uploaded_names):
                     time.sleep(INDEX_SETTLE_SECONDS)  # 검색에 기대는 자료가 남았을 때만 기다린다
-            yield ndjson({"type": "turn-start"})
+            # 자리표시자가 아닌 실제 심의 질문에만 출력 규칙을 붙인다
+            message = f"{message}\n\n{REPORT_INSTRUCTION}"
+            yield {"type": "turn-start"}
             for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message, image_file_ids):
-                yield ndjson(evt)
-            yield ndjson({"type": "turn-end"})
+                yield evt
+            yield {"type": "turn-end"}
     except Exception as e:
-        yield ndjson({"type": "error", "message": friendly_error(e)})
+        yield {"type": "error", "message": friendly_error(e)}
 
 
 def stream_continue(chat_id: str, message: str):
     try:
-        yield ndjson({"type": "turn-start"})
+        yield {"type": "turn-start"}
         for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message):
-            yield ndjson(evt)
-        yield ndjson({"type": "turn-end"})
+            yield evt
+        yield {"type": "turn-end"}
     except Exception as e:
-        yield ndjson({"type": "error", "message": friendly_error(e)})
+        yield {"type": "error", "message": friendly_error(e)}
 
 
 @app.post("/api/review")
 async def start_review(message: str = Form(...), files: list[UploadFile] = File(default=[])):
-    """새 심의 요청: 대화 생성 → 자료 업로드 → 검토 요청까지 실시간 스트림으로 릴레이.
+    """새 심의 요청: 대화 생성 → 자료 업로드 → 검토 요청까지 실시간 스트림으로 릴레이하며 DB에 기록.
 
     FastAPI는 핸들러가 반환되는 즉시 UploadFile을 닫으므로(스트리밍 제너레이터는
     그 이후에 실행됨) 여기서 bytes로 미리 읽어 넘긴다 — 안 그러면 read of closed file.
     """
     payloads = [(f.filename, await f.read(), f.content_type) for f in files if f.filename]
-    return StreamingResponse(stream_new_review(message, payloads), media_type="application/x-ndjson")
+    files_meta = [{"name": name, "size": len(content)} for name, content, _ in payloads]
+    events = record(stream_new_review(message, payloads), message, files_meta)
+    return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")
 
 
 @app.post("/api/review/{chat_id}/message")
 async def continue_review(chat_id: str, message: str = Form(...)):
-    """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이."""
-    return StreamingResponse(stream_continue(chat_id, message), media_type="application/x-ndjson")
+    """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이하며 DB에 기록."""
+    review_id = db.find_review_id(chat_id)
+    if review_id is None:
+        raise HTTPException(404, "저장된 안건이 없는 대화입니다")
+    db.add_user_turn(review_id, message)
+    events = record(stream_continue(chat_id, message), message, [], review_id)
+    return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")

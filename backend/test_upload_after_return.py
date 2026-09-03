@@ -5,10 +5,19 @@
 #  4) 거절된 파일이 file-error로 보고되고 나머지는 계속 진행되는지
 #  5) 자리표시자 턴을 끝까지 읽고 나서 업로드하는지 (중도 절단 시 웍스가 504로 막는다)
 #  6) 작은 엑셀 변환본이 질문에 원문 그대로 실리는지 (검색 조각 누락으로 자료를 못 읽던 회귀)
+#  7) 출력 규칙(REPORT_INSTRUCTION)이 실제 심의 질문에만 붙는지 (자리표시자에는 X)
+#  8) meta 에 reviewId 가 실리고 안건·파일·ai 턴이 저장되는지
 import io
 import json
+import os
 
+# 이 테스트는 main 을 import 하는 순간 .env 의 DATABASE_URL(개발 DB)을 물게 된다.
+# 아래 reset() 이 TRUNCATE 를 날리므로 test_api.py 와 같은 방식으로 테스트 DB를 하드 대입한다.
+os.environ["DATABASE_URL"] = "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test"
+
+import db
 import main
+from sqlalchemy import text
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -77,6 +86,12 @@ def make_xlsx() -> bytes:
 
 main.requests.post = fake_post
 
+# 매 실행이 같은 chatId("c1")를 쓰므로 비우고 시작해야 UNIQUE 위반 없이 저장까지 검증된다
+assert db.DATABASE_URL.endswith("_test"), f"테스트 DB가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
+with db.Session(db.engine) as s:
+    s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
+    s.commit()
+
 client = TestClient(main.app)
 resp = client.post(
     "/api/review",
@@ -119,5 +134,21 @@ assert "im.pdf 원문" not in review_body["message"], "변환 대상이 아닌 �
 
 # 5) 첫 업로드 전에 자리표시자 스트림이 끝까지 읽혀 있어야 한다
 assert first_upload_at[0] >= 4, f"자리표시자 턴을 끝까지 읽기 전에 업로드했다 — {first_upload_at[0]}/4줄 (504 회귀)"
+
+# 7) 출력 규칙은 실제 심의 질문에만 — 자리표시자 턴에 붙으면 첫 턴부터 보고서를 쓰려 든다
+from report import REPORT_INSTRUCTION
+
+assert chat_bodies[0]["message"] == "자료를 첨부할게", f"자리표시자가 변형됨: {chat_bodies[0]['message'][:80]}"
+assert REPORT_INSTRUCTION in review_body["message"], "실제 질문에 출력 규칙이 안 붙음"
+
+# 8) 저장: meta 에 reviewId, 안건 1건에 파일 3건과 ai 턴 1건
+meta = next(e for e in events if e["type"] == "meta")
+assert meta.get("reviewId"), f"meta 에 reviewId 없음: {meta}"
+detail = db.get_review(meta["reviewId"])
+assert [f["filename"] for f in detail["files"]] == ["im.pdf", "chart.png", "model.md"], f"파일 저장 이상: {detail['files']}"
+roles = [t["role"] for t in detail["turns"]]
+assert roles == ["user", "ai"], f"턴 저장 이상 (자리표시자가 새어 들어갔는지 확인): {roles}"
+assert detail["turns"][0]["payload"]["text"] == "이 IM 분석해줘", "사용자 턴은 원문 그대로 (규칙 미포함)"
+assert any(e["type"] == "text-delta" for e in detail["turns"][1]["payload"]), "ai 턴 이벤트 미저장"
 
 print("OK:", types)
