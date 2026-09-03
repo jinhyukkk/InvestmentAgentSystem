@@ -7,6 +7,7 @@
 #  6) 작은 엑셀 변환본이 질문에 원문 그대로 실리는지 (검색 조각 누락으로 자료를 못 읽던 회귀)
 #  7) 출력 규칙(REPORT_INSTRUCTION)이 실제 심의 질문에만 붙는지 (자리표시자에는 X)
 #  8) meta 에 reviewId 가 실리고 안건·파일·ai 턴이 저장되는지
+#  9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행되는지
 import io
 import json
 import os
@@ -141,6 +142,13 @@ from report import REPORT_INSTRUCTION
 assert chat_bodies[0]["message"] == "자료를 첨부할게", f"자리표시자가 변형됨: {chat_bodies[0]['message'][:80]}"
 assert REPORT_INSTRUCTION in review_body["message"], "실제 질문에 출력 규칙이 안 붙음"
 
+# 7-1) 자료가 없는 경로도 같은 규칙 — 이쪽 주입 지점은 별도 assert가 없어 회귀에 취약했다
+resp_no_files = client.post("/api/review", data={"message": "포트폴리오 리스크 점검해줘"})
+no_files_events = [json.loads(line) for line in resp_no_files.text.strip().splitlines()]
+assert "error" not in [e["type"] for e in no_files_events], f"error 이벤트 발생(자료 없음): {no_files_events}"
+no_files_body = chat_bodies[-1]
+assert REPORT_INSTRUCTION in no_files_body["message"], "자료 없는 경로에 출력 규칙이 안 붙음"
+
 # 8) 저장: meta 에 reviewId, 안건 1건에 파일 3건과 ai 턴 1건
 meta = next(e for e in events if e["type"] == "meta")
 assert meta.get("reviewId"), f"meta 에 reviewId 없음: {meta}"
@@ -150,5 +158,14 @@ roles = [t["role"] for t in detail["turns"]]
 assert roles == ["user", "ai"], f"턴 저장 이상 (자리표시자가 새어 들어갔는지 확인): {roles}"
 assert detail["turns"][0]["payload"]["text"] == "이 IM 분석해줘", "사용자 턴은 원문 그대로 (규칙 미포함)"
 assert any(e["type"] == "text-delta" for e in detail["turns"][1]["payload"]), "ai 턴 이벤트 미저장"
+
+# 9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행돼야 한다
+# (저장이 실패해 안건 행이 없는 대화라도, 사용자가 보고 있는 심의는 계속 쓸 수 있어야 한다)
+resp_orphan = client.post("/api/review/ghost-chat-id/message", data={"message": "후속 질문"})
+assert resp_orphan.status_code == 200, f"저장 안 된 대화의 후속 메시지가 실패함: {resp_orphan.status_code} {resp_orphan.text[:200]}"
+orphan_events = [json.loads(line) for line in resp_orphan.text.strip().splitlines()]
+orphan_types = [e["type"] for e in orphan_events]
+assert "error" not in orphan_types, f"error 이벤트 발생(안건 없음): {orphan_events}"
+assert "text-delta" in orphan_types, f"정상 스트림이 아님: {orphan_events}"
 
 print("OK:", types)

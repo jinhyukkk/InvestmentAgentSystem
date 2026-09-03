@@ -12,7 +12,7 @@ import os
 import time
 
 import requests
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -290,26 +290,43 @@ def record(events, user_text: str, files_meta: list[dict], review_id: int | None
 
     새 심의는 meta 에서 안건을 만들고(reviewId 를 meta 에 실음), 이어가기는 review_id 를 받아 온다.
     turn-start~turn-end 사이 이벤트를 모아 ai 턴 하나로 저장한다.
+    review_id 가 끝까지 None 이면(안건 생성 실패, 또는 안건 없이 이어가기) 저장 분기는 전부
+    비활성 — 릴레이만 계속된다.
+
+    try 는 db.* 호출만 감싼다. evt 딕셔너리 접근까지 같이 감싸면 이벤트 처리 버그(KeyError 등)가
+    "저장 실패"로 위장돼 로그에서 DB 장애와 구분이 안 된다.
     """
     buf = None
     for evt in events:
-        try:
-            t = evt.get("type")
-            if t == "meta" and review_id is None:
-                review_id = db.create_review(evt["chatId"], user_text, files_meta)
+        t = evt.get("type")
+        if t == "meta" and review_id is None:
+            chat_id = evt["chatId"]
+            try:
+                review_id = db.create_review(chat_id, user_text, files_meta)
+            except Exception:
+                logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+            else:
                 evt = {**evt, "reviewId": review_id}
-            elif t == "turn-start":
-                buf = []
-            elif t == "turn-end":
-                if buf is not None and review_id is not None:
+        elif t == "file-uploaded":
+            # 버퍼링(elif buf is not None) 분기보다 먼저 판정한다 — turn-start~end 사이에
+            # 파일 이벤트가 끼어도 순서에 기대지 않고 항상 파일로 저장한다.
+            if review_id is not None:
+                file = evt["file"]
+                try:
+                    db.add_file(review_id, file)
+                except Exception:
+                    logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+        elif t == "turn-start":
+            buf = []
+        elif t == "turn-end":
+            if buf is not None and review_id is not None:
+                try:
                     db.save_ai_turn(review_id, buf)
-                buf = None
-            elif buf is not None:
-                buf.append(evt)
-            elif t == "file-uploaded" and review_id is not None:
-                db.add_file(review_id, evt["file"])
-        except Exception:
-            logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+                except Exception:
+                    logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+            buf = None  # 저장 성공 여부와 무관하게 다음 턴을 위해 초기화
+        elif buf is not None:
+            buf.append(evt)
         yield evt
 
 
@@ -416,11 +433,17 @@ async def start_review(message: str = Form(...), files: list[UploadFile] = File(
 
 
 @app.post("/api/review/{chat_id}/message")
-async def continue_review(chat_id: str, message: str = Form(...)):
-    """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이하며 DB에 기록."""
+def continue_review(chat_id: str, message: str = Form(...)):
+    """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이하며 DB에 기록.
+
+    안건 생성이 저장 실패로 비어있는 대화(review_id 없음)라도 후속 메시지는 계속 진행한다 —
+    저장 장애가 진행 중인 심의를 영구히 못 쓰게 만들면 안 된다는 원칙. 이 경우 저장은 건너뛴다.
+    동기 def 라야 FastAPI가 스레드풀에서 돌려 db.* 동기 호출이 이벤트 루프를 막지 않는다.
+    """
     review_id = db.find_review_id(chat_id)
     if review_id is None:
-        raise HTTPException(404, "저장된 안건이 없는 대화입니다")
-    db.add_user_turn(review_id, message)
+        logger.warning("저장된 안건 없이 후속 메시지 진행 (chat=%s)", chat_id)
+    else:
+        db.add_user_turn(review_id, message)
     events = record(stream_continue(chat_id, message), message, [], review_id)
     return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")
