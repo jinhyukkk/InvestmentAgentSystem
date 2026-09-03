@@ -48,7 +48,8 @@ REPORT_INSTRUCTION = (
     "숫자 필드는 억원 단위 숫자만.\n" + REPORT_SCHEMA
 )
 
-_FENCE = re.compile(r"```json\s*\n(.*?)\n\s*```", re.DOTALL)
+# ponytail: 닫는 ``` 앞 개행은 선택(모델이 한 줄짜리 블록을 낼 수 있음). 여는 쪽 개행은 그대로 유지.
+_FENCE = re.compile(r"```json\s*\n(.*?)\n?\s*```", re.DOTALL)
 _ENUM_FIELDS = (("asset_type", ASSET_TYPES), ("review_level", REVIEW_LEVELS), ("recommendation", RECOMMENDATIONS))
 
 
