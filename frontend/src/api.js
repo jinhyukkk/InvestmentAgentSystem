@@ -1,18 +1,28 @@
 const API_BASE = "http://localhost:8787";
 
-// 백엔드가 NDJSON(줄 단위 JSON)으로 실시간 이벤트를 흘려보내면, 도착하는 즉시 onEvent로 넘긴다.
-async function streamNdjson(url, form, onEvent) {
+// 서버가 안 떠 있으면 fetch 자체가 TypeError로 죽는다 — 스트림 중단과는 원인이 달라 구분해 알린다.
+function offlineError(cause) {
+  const err = new Error(`백엔드 서버(${API_BASE})에 연결할 수 없습니다. 서버가 실행 중인지 확인해 주세요.`);
+  err.offline = true;
+  err.cause = cause;
+  return err;
+}
+
+async function request(url, init) {
   let res;
   try {
-    res = await fetch(url, { method: "POST", body: form });
+    res = await fetch(url, init);
   } catch (e) {
-    // 서버가 안 떠 있으면 fetch 자체가 TypeError로 죽는다 — 스트림 중단과는 원인이 달라 구분해 알린다.
-    const err = new Error(`백엔드 서버(${API_BASE})에 연결할 수 없습니다. 서버가 실행 중인지 확인해 주세요.`);
-    err.offline = true;
-    err.cause = e;
-    throw err;
+    throw offlineError(e);
   }
-  if (!res.ok || !res.body) throw new Error(await res.text());
+  if (!res.ok) throw new Error(await res.text());
+  return res;
+}
+
+// 백엔드가 NDJSON(줄 단위 JSON)으로 실시간 이벤트를 흘려보내면, 도착하는 즉시 onEvent로 넘긴다.
+async function streamNdjson(url, form, onEvent) {
+  const res = await request(url, { method: "POST", body: form });
+  if (!res.body) throw new Error("응답 본문이 없습니다");
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -44,4 +54,22 @@ export function streamContinueReview(chatId, message, onEvent) {
   const form = new FormData();
   form.append("message", message);
   return streamNdjson(`${API_BASE}/api/review/${chatId}/message`, form, onEvent);
+}
+
+const json = (res) => res.json();
+
+export function fetchReviews(params = {}) {
+  return request(`${API_BASE}/api/reviews?${new URLSearchParams(params)}`).then(json);
+}
+
+export function fetchReview(id) {
+  return request(`${API_BASE}/api/reviews/${id}`).then(json);
+}
+
+export function patchReview(id, body) {
+  return request(`${API_BASE}/api/reviews/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then(json);
 }

@@ -1,20 +1,13 @@
-// 목업(유진그룹 투자심의 시스템.html)의 JS 데이터 모델을 그대로 이식.
-// 대시보드/안건목록/상세는 아직 실제 백엔드(케이스 저장소)가 없어 임시 목업 데이터로 구성.
+// 안건 표시용 스타일·계산 헬퍼. 데이터는 GET /api/reviews 에서 온다.
 
 export const steps = ["접수", "자료 분석", "외부 데이터 수집", "정보 보강", "4관점 분석", "종합", "심의 상정", "최종 결정"];
 
-export const cases = [
-  { id: "c1", company: "대성정밀공업 인수", assetType: "M&A", sector: "자동차 부품", totalInvest: 1850, basePrice: 1720, received: "2026-05-12", status: "심의 대기", reviewLevel: "본심의", aiScore: 82, aiRec: "조건부 투자 승인", committee: null, stage: 6 },
-  { id: "c2", company: "송도 스마트 물류센터", assetType: "실물자산", sector: "물류 인프라", totalInvest: 2400, basePrice: 2400, received: "2026-04-28", status: "검토 중", reviewLevel: "본심의", aiScore: 76, aiRec: "조건부 투자 승인", committee: null, stage: 4, awaitInput: true },
-  { id: "c3", company: "베트남 흥옌 2차전지 소재공장", assetType: "그린필드", sector: "배터리 소재", totalInvest: 3200, basePrice: null, received: "2026-06-02", status: "검토 중", reviewLevel: "예비 검토", aiScore: 68, aiRec: "추가 검토 후 재상정", committee: null, stage: 3, provisional: true },
-  { id: "c9", company: "분당 프라임 오피스타워", assetType: "실물자산", sector: "상업용 부동산", totalInvest: 1450, basePrice: 1450, received: "2026-05-30", status: "심의 대기", reviewLevel: "본심의", aiScore: 71, aiRec: "조건부 투자 승인", committee: null, stage: 6 },
-  { id: "c8", company: "울산 그린수소 생산플랜트", assetType: "그린필드", sector: "에너지", totalInvest: 2750, basePrice: null, received: "2026-06-15", status: "검토 중", reviewLevel: "예비 검토", aiScore: null, aiRec: null, committee: null, stage: 1 },
-  { id: "c4", company: "평택 하이퍼스케일 데이터센터", assetType: "실물자산", sector: "IT 인프라", totalInvest: 2100, basePrice: 2050, received: "2026-03-10", status: "완료", reviewLevel: "본심의", aiScore: 88, aiRec: "투자 승인", committee: "승인", stage: 7 },
-  { id: "c5", company: "광양 특수강 합작법인", assetType: "M&A", sector: "철강", totalInvest: 1680, basePrice: 1590, received: "2026-02-24", status: "완료", reviewLevel: "본심의", aiScore: 79, aiRec: "조건부 투자 승인", committee: "조건부 승인", stage: 7 },
-  { id: "c7", company: "창원 정밀기계 인수", assetType: "M&A", sector: "기계", totalInvest: 940, basePrice: 910, received: "2026-01-30", status: "완료", reviewLevel: "본심의", aiScore: 84, aiRec: "투자 승인", committee: "조건부 승인", stage: 7 },
-  { id: "c6", company: "인도네시아 니켈 제련소", assetType: "그린필드", sector: "비철금속", totalInvest: 3600, basePrice: null, received: "2026-02-08", status: "완료", reviewLevel: "본심의", aiScore: 61, aiRec: "추가 검토 후 재상정", committee: "부결", stage: 7 },
-  { id: "c10", company: "천안 반도체 후공정 인수", assetType: "M&A", sector: "반도체", totalInvest: 1220, basePrice: 1180, received: "2026-01-15", status: "완료", reviewLevel: "본심의", aiScore: 45, aiRec: "투자 부적합", committee: "부결", stage: 7 },
-];
+export const ASSET_TYPES = ["M&A", "실물자산", "그린필드"];
+export const REVIEW_LEVELS = ["예비 검토", "본심의"];
+export const COMMITTEES = ["승인", "조건부 승인", "부결", "재상정"];
+
+// 서버 status → 8단계 타임라인 위치. 세부 단계는 서버가 모르므로 세 지점만 쓴다.
+const STAGE_BY_STATUS = { "검토 중": 1, "심의 대기": 6, 완료: 7 };
 
 export function fmt(n) {
   return n == null ? "—" : n.toLocaleString("ko-KR") + "억원";
@@ -73,7 +66,8 @@ export function decorate(c) {
     comLabel: c.committee || "심의 전",
     matchStyle: chipSm(matchC),
     matchLabel: match,
-    stageLabel: c.awaitInput ? "입력 대기 중" : steps[c.stage],
+    stage: STAGE_BY_STATUS[c.status] ?? 0,
+    stageLabel: steps[STAGE_BY_STATUS[c.status] ?? 0],
     awaitLabel: c.awaitInput ? "입력 대기" : "",
     awaitStyle: c.awaitInput
       ? "display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;color:#9A6B10;background:#FaF0D8;border:1px solid #EDD9A8;padding:2px 7px;border-radius:20px;"
@@ -91,15 +85,39 @@ export function statusChip(st) {
   return `display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:${m.c};background:${m.bg};padding:3px 9px;border-radius:20px;white-space:nowrap;`;
 }
 
-export const statCards = [
-  { label: "검토 중", value: "3", unit: "건", delta: "AI 분석 진행", deltaColor: "#3B5A86" },
-  { label: "심의 대기", value: "2", unit: "건", delta: "상정 완료", deltaColor: "#9A6B10" },
-  { label: "이번 분기 완료", value: "12", unit: "건", delta: "전분기 대비 +3", deltaColor: "#0F7A55" },
-  { label: "승인율", value: "67", unit: "%", delta: "승인·조건부 8 / 12", deltaColor: "#8A94A3" },
-];
+function quarterOf(dateStr) {
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}Q${Math.floor(d.getMonth() / 3) + 1}`;
+}
 
-export const matchBars = [
-  { label: "일치", count: "3건", pct: 75, color: "#0F7A55" },
-  { label: "부분 일치", count: "1건", pct: 25, color: "#C79A3A" },
-  { label: "불일치", count: "1건", pct: 25, color: "#C86B63" },
-];
+export function quarterLabel(date = new Date()) {
+  return `${date.getFullYear()}년 ${Math.floor(date.getMonth() / 3) + 1}분기`;
+}
+
+// decorate()를 거친 행 배열에서 대시보드 카드·일치율을 계산한다.
+export function computeStats(rows) {
+  const count = (pred) => rows.filter(pred).length;
+  const done = rows.filter((c) => c.status === "완료");
+  const thisQ = quarterOf(new Date().toISOString());
+  const doneThisQ = done.filter((c) => c.decidedAt && quarterOf(c.decidedAt) === thisQ).length;
+  const approved = done.filter((c) => c.committee === "승인" || c.committee === "조건부 승인").length;
+  const approvalRate = done.length ? Math.round((approved / done.length) * 100) : 0;
+  const matched = done.filter((c) => c.matchLabel !== "—");
+  const pct = (n) => (matched.length ? Math.round((n / matched.length) * 100) : 0);
+  const bar = (label, color) => {
+    const n = matched.filter((c) => c.matchLabel === label).length;
+    return { label: label === "부분" ? "부분 일치" : label, count: `${n}건`, pct: pct(n), color };
+  };
+  return {
+    statCards: [
+      { label: "검토 중", value: String(count((c) => c.status === "검토 중")), unit: "건", delta: "AI 분석 진행", deltaColor: "#3B5A86" },
+      { label: "심의 대기", value: String(count((c) => c.status === "심의 대기")), unit: "건", delta: "보고서 완료", deltaColor: "#9A6B10" },
+      { label: "이번 분기 완료", value: String(doneThisQ), unit: "건", delta: `전체 완료 ${done.length}건`, deltaColor: "#0F7A55" },
+      { label: "승인율", value: String(approvalRate), unit: "%", delta: `승인·조건부 ${approved} / ${done.length}`, deltaColor: "#8A94A3" },
+    ],
+    approvalRate,
+    approvedText: `완료 ${done.length}건 중 승인·조건부 ${approved}건`,
+    matchRate: pct(matched.filter((c) => c.matchLabel === "일치").length),
+    matchBars: [bar("일치", "#0F7A55"), bar("부분", "#C79A3A"), bar("불일치", "#C86B63")],
+  };
+}
