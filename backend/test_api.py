@@ -1,13 +1,15 @@
-# ponytail: 회귀 체크 — 실행: DATABASE_URL 이 테스트용 DB를 가리킨 상태에서 python test_api.py
+# ponytail: 회귀 체크 — 실행: backend 디렉터리에서 python test_api.py
 #  1) 안건 생성 → 목록에 '검토 중'으로 나오는지
 #  2) ai 턴에 json 블록이 있으면 점수·권고가 채워지고 '심의 대기'가 되는지
 #  3) 사람이 접수 정보를 고친 뒤에는 AI 재파싱이 덮어쓰지 않는지
 #  4) 위원회 결정 입력 → '완료', 해제 → '심의 대기'
-#  5) 허용 목록 밖 값은 422
+#  5) created_at 이 UTC 로 저장돼도 날짜는 한국 시간(KST) 기준으로 나오는지
 import os
 
-os.environ.setdefault("WRKS_API_KEY", "test")
-os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test")
+os.environ["WRKS_API_KEY"] = "test"
+# 반드시 하드 대입: setdefault 를 쓰면 개발자 쉘에 DATABASE_URL 이 이미 개발 DB로 export 돼
+# 있을 때 아무 효과가 없어서, 아래 reset() 의 TRUNCATE 가 실제 운영/개발 데이터를 지워버린다.
+os.environ["DATABASE_URL"] = "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test"
 
 from sqlalchemy import text
 
@@ -17,6 +19,8 @@ REPORT = '```json\n{"total_score": 82, "recommendation": "조건부 투자 승�
 
 
 def reset():
+    # 실수로 개발 DB를 겨냥한 채 실행되더라도 TRUNCATE 가 나가기 전에 막는다
+    assert db.DATABASE_URL.endswith("_test"), f"테스트 DB(이름이 _test로 끝나야 함)가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
     db.init_db()
     with db.Session(db.engine) as s:
         s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
@@ -67,6 +71,15 @@ def test_manual_edit_wins():
     assert d["aiScore"] == 70, "점수·보고서는 계속 갱신된다"
 
 
+def test_kst_date_boundary():
+    # db._date() 를 직접 호출한다: DB 서버 세션 타임존이 이미 Asia/Seoul 이면
+    # list_reviews() 왕복만으로는 UTC .date() 버그가 가려져 버려서 검증이 안 된다.
+    from datetime import timezone as _tz, datetime as _dt
+
+    utc_instant = _dt(2026, 5, 11, 23, 30, tzinfo=_tz.utc)  # 한국 시간으로는 2026-05-12 08:30
+    assert db._date(utc_instant) == "2026-05-12", "UTC 그대로 .date() 를 뽑으면 하루 전 날짜가 나온다"
+
+
 def test_committee_status():
     reset()
     rid = db.create_review("chat-4", "검토", [])
@@ -82,5 +95,6 @@ if __name__ == "__main__":
     test_create_and_list()
     test_ai_turn_fills_report()
     test_manual_edit_wins()
+    test_kst_date_boundary()
     test_committee_status()
     print("test_api(db) OK")

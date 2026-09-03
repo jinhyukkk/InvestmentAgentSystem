@@ -2,6 +2,7 @@
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -18,6 +19,7 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 INTAKE_FIELDS = ("company", "asset_type", "sector", "total_invest", "base_price", "review_level")
 TITLE_LEN = 24
+KST = ZoneInfo("Asia/Seoul")
 
 
 def now() -> datetime:
@@ -96,7 +98,12 @@ def add_user_turn(review_id: int, text: str) -> None:
 
 def add_file(review_id: int, file: dict) -> None:
     with Session(engine) as s:
-        r = s.get(Review, review_id)
+        # with_for_update: 같은 안건에 여러 파일이 동시에 업로드되면 각자 files_json 을 읽어
+        # 통째로 다시 쓰기 때문에, 락 없이는 나중에 커밋한 쪽이 먼저 것을 덮어써 파일이 사라진다.
+        r = s.get(Review, review_id, with_for_update=True)
+        if not r:
+            logger.warning("add_file: 존재하지 않는 review_id=%s", review_id)
+            return
         r.files_json = [*r.files_json, {"filename": file.get("filename"), "original": file.get("original"), "size": file.get("size")}]
         s.commit()
 
@@ -109,6 +116,11 @@ def save_ai_turn(review_id: int, events: list[dict]) -> None:
         s.add(Turn(review_id=review_id, role="ai", payload_json=events))
         if report:
             r = s.get(Review, review_id)
+            if not r:
+                # 안건이 이미 삭제됐거나 잘못된 id — 턴 원본은 남기되 안건 필드 갱신만 건너뛴다
+                logger.warning("save_ai_turn: 존재하지 않는 review_id=%s", review_id)
+                s.commit()
+                return
             r.ai_score = report["total_score"]
             r.ai_rec = report.get("recommendation")
             r.report_json = report
@@ -125,7 +137,10 @@ def _num(v):
 
 
 def _date(d: datetime | None):
-    return d.date().isoformat() if d else None
+    # 저장은 UTC 그대로 하되, 화면에 보여줄 날짜는 한국 시간 기준이어야 한다.
+    # 예: 08:00 KST 접수 = 전날 23:00 UTC — 여기서 그냥 .date() 를 뽑으면 아침 9시간 동안 하루 전으로 보인다.
+    # 이 변환을 "단순화" 랍시고 없애면 그 버그가 그대로 되살아나니 지우지 말 것.
+    return d.astimezone(KST).date().isoformat() if d else None
 
 
 def _summary(r: Review) -> dict:
