@@ -11,10 +11,13 @@ import logging
 import os
 import time
 
+from typing import Literal
+
 import requests
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
 def load_env_file() -> None:
     """.env 의 KEY=VALUE 를 환경변수로 올린다 (이미 설정된 환경변수가 우선)."""
@@ -33,7 +36,7 @@ load_env_file()  # AGENT_ID·API_KEY 를 읽기 전에 올려야 .env 값이 먹
 
 # db 는 import 시점에 DATABASE_URL 을 요구한다 — 반드시 load_env_file() 뒤에서 import 해야 한다
 import db  # noqa: E402
-from report import REPORT_INSTRUCTION  # noqa: E402
+from report import ASSET_TYPES, COMMITTEES, REPORT_INSTRUCTION, REVIEW_LEVELS  # noqa: E402
 
 WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
@@ -447,3 +450,49 @@ def continue_review(chat_id: str, message: str = Form(...)):
         db.add_user_turn(review_id, message)
     events = record(stream_continue(chat_id, message), message, [], review_id)
     return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")
+
+
+class ReviewPatch(BaseModel):
+    """사람이 고치는 필드만. status·점수는 서버가 정하므로 받지 않는다(extra=forbid)."""
+
+    model_config = ConfigDict(extra="forbid")
+    company: str | None = None
+    assetType: Literal[ASSET_TYPES] | None = None
+    sector: str | None = None
+    totalInvest: float | None = None
+    basePrice: float | None = None
+    reviewLevel: Literal[REVIEW_LEVELS] | None = None
+    committee: Literal[COMMITTEES] | None = None
+    committeeNote: str | None = None
+
+
+_SNAKE = {
+    "assetType": "asset_type",
+    "totalInvest": "total_invest",
+    "basePrice": "base_price",
+    "reviewLevel": "review_level",
+    "committeeNote": "committee_note",
+}
+
+
+@app.get("/api/reviews")
+def list_reviews(asset_type: str | None = None, status: str | None = None):
+    return db.list_reviews(asset_type, status)
+
+
+@app.get("/api/reviews/{review_id}")
+def get_review(review_id: int):
+    r = db.get_review(review_id)
+    if r is None:
+        raise HTTPException(404, "안건이 없습니다")
+    return r
+
+
+@app.patch("/api/reviews/{review_id}")
+def patch_review(review_id: int, patch: ReviewPatch):
+    # exclude_unset: 보낸 필드만 갱신한다. null 을 보내면 지운다(위원회 결정 해제).
+    fields = {_SNAKE.get(k, k): v for k, v in patch.model_dump(exclude_unset=True).items()}
+    r = db.update_review(review_id, fields)
+    if r is None:
+        raise HTTPException(404, "안건이 없습니다")
+    return r

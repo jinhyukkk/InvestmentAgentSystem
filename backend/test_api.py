@@ -91,10 +91,43 @@ def test_committee_status():
     assert db.update_review(999, {"committee": "승인"}) is None
 
 
+from fastapi.testclient import TestClient
+import main
+
+client = TestClient(main.app)
+
+
+def test_http_list_detail_patch():
+    reset()
+    rid = db.create_review("chat-5", "HTTP 검토", [])
+    db.save_ai_turn(rid, ai_turn(REPORT))
+    assert client.get("/api/reviews").json()[0]["id"] == rid
+    assert client.get("/api/reviews", params={"asset_type": "실물자산"}).json() == []
+    assert client.get("/api/reviews", params={"status": "심의 대기"}).json()[0]["id"] == rid
+    assert client.get("/api/reviews/999").status_code == 404
+    d = client.get(f"/api/reviews/{rid}").json()
+    assert d["reportJson"]["total_score"] == 82 and len(d["turns"]) == 2
+    r = client.patch(f"/api/reviews/{rid}", json={"committee": "부결", "committeeNote": "리스크"})
+    assert r.status_code == 200 and r.json()["status"] == "완료"
+    r = client.patch(f"/api/reviews/{rid}", json={"company": "정정", "totalInvest": 2000})
+    assert r.json()["company"] == "정정" and r.json()["totalInvest"] == 2000
+    assert client.patch(f"/api/reviews/{rid}", json={"committee": "엉뚱"}).status_code == 422
+    assert client.patch(f"/api/reviews/{rid}", json={"status": "완료"}).status_code == 422, "status 는 서버가 정한다"
+    assert client.patch("/api/reviews/999", json={"committee": "승인"}).status_code == 404
+    # committee: null 은 결정 해제, committee 자체를 안 보내면 그대로 유지 — 구분되어야 한다
+    r = client.patch(f"/api/reviews/{rid}", json={"committee": "승인"})
+    assert r.json()["status"] == "완료"
+    r = client.patch(f"/api/reviews/{rid}", json={"company": "재정정"})
+    assert r.json()["status"] == "완료" and r.json()["committee"] == "승인", "committee 미포함이면 유지"
+    r = client.patch(f"/api/reviews/{rid}", json={"committee": None})
+    assert r.json()["status"] == "심의 대기" and r.json()["committee"] is None, "committee: null 은 해제"
+
+
 if __name__ == "__main__":
     test_create_and_list()
     test_ai_turn_fills_report()
     test_manual_edit_wins()
     test_kst_date_boundary()
     test_committee_status()
-    print("test_api(db) OK")
+    test_http_list_detail_patch()
+    print("test_api OK")
