@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { colors } from "./theme.js";
 import { cssStr } from "./cssStr.js";
-import { cases, decorate, statCards, matchBars } from "./mockData.js";
+import { decorate, computeStats, quarterLabel } from "./mockData.js";
+import { fetchReviews } from "./api.js";
+import { useAsync, AsyncStatus } from "./useAsync.jsx";
 
 const seg = (on) => ({
   border: "none",
@@ -18,7 +20,9 @@ const seg = (on) => ({
 
 export default function Dashboard({ onOpenCase, onNewRequest }) {
   const [variant, setVariant] = useState("a");
-  const dec = cases.map(decorate);
+  const { data, error, loading, reload } = useAsync(fetchReviews, []);
+  const dec = (data || []).map(decorate);
+  const stats = computeStats(dec);
   const active = dec.filter((c) => c.status !== "완료");
   const recent = dec.filter((c) => c.status === "완료").slice(0, 5);
   const boardColumns = [
@@ -32,7 +36,7 @@ export default function Dashboard({ onOpenCase, onNewRequest }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22, flexWrap: "wrap", gap: 12 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em" }}>투자심의 현황</div>
-          <div style={{ fontSize: 12.5, color: colors.textMuted, marginTop: 3 }}>2026년 2분기 · 마지막 갱신 오늘 09:12</div>
+          <div style={{ fontSize: 12.5, color: colors.textMuted, marginTop: 3 }}>{quarterLabel()} · 전체 {dec.length}건</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ display: "flex", background: "#EBEEF2", borderRadius: 9, padding: 3 }}>
@@ -52,10 +56,12 @@ export default function Dashboard({ onOpenCase, onNewRequest }) {
         </div>
       </div>
 
+      <AsyncStatus loading={loading} error={error} empty={!loading && !error && dec.length === 0} onRetry={reload} />
+
       {variant === "a" && (
         <div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 26 }}>
-            {statCards.map((s) => (
+            {stats.statCards.map((s) => (
               <div key={s.label} style={{ background: "#fff", border: `1px solid ${colors.border}`, borderRadius: 12, padding: "18px 18px 16px" }}>
                 <div style={{ fontSize: 12, color: colors.textMuted, fontWeight: 500 }}>{s.label}</div>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 10 }}>
@@ -183,23 +189,23 @@ export default function Dashboard({ onOpenCase, onNewRequest }) {
             <div style={{ background: colors.navy, color: "#fff", borderRadius: 12, padding: 20 }}>
               <div style={{ fontSize: 12, color: "#9DB0C7" }}>이번 분기 승인율</div>
               <div style={{ display: "flex", alignItems: "baseline", gap: 6, margin: "8px 0 14px" }}>
-                <div style={{ fontSize: 38, fontWeight: 700 }}>67</div>
+                <div style={{ fontSize: 38, fontWeight: 700 }}>{stats.approvalRate}</div>
                 <div style={{ fontSize: 18, color: "#9DB0C7" }}>%</div>
               </div>
               <div style={{ height: 8, background: "rgba(255,255,255,0.12)", borderRadius: 4, overflow: "hidden" }}>
-                <div style={{ width: "67%", height: "100%", background: "linear-gradient(90deg,#3E8ED0,#5FB39A)" }} />
+                <div style={{ width: `${stats.approvalRate}%`, height: "100%", background: "linear-gradient(90deg,#3E8ED0,#5FB39A)" }} />
               </div>
-              <div style={{ fontSize: 11, color: "#7E93AD", marginTop: 9 }}>완료 12건 중 승인·조건부 8건</div>
+              <div style={{ fontSize: 11, color: "#7E93AD", marginTop: 9 }}>{stats.approvedText}</div>
             </div>
             <div style={{ background: "#fff", border: `1px solid ${colors.border}`, borderRadius: 12, padding: 18 }}>
               <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>AI 권고 ↔ 위원회 결정</div>
               <div style={{ fontSize: 11, color: "#9AA3AF", marginBottom: 14 }}>최근 완료 안건 일치율</div>
               <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-                <div style={{ fontSize: 26, fontWeight: 700, color: "#2E6BB0" }}>75</div>
+                <div style={{ fontSize: 26, fontWeight: 700, color: "#2E6BB0" }}>{stats.matchRate}</div>
                 <div style={{ fontSize: 13, color: colors.textMuted }}>%</div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
-                {matchBars.map((m) => (
+                {stats.matchBars.map((m) => (
                   <div key={m.label}>
                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#5A6473", marginBottom: 4 }}>
                       <span>{m.label}</span>

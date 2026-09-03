@@ -21,3 +21,20 @@ export function useAsync(fn, deps) {
 
   return { ...state, reload };
 }
+
+// 불러오는 중·실패·0건을 한 줄로. 세 화면이 같은 문구를 쓴다.
+export function AsyncStatus({ loading, error, empty, onRetry }) {
+  const box = { padding: "40px 20px", textAlign: "center", fontSize: 13, color: "#8A94A3" };
+  if (loading) return <div style={box}>불러오는 중…</div>;
+  if (error)
+    return (
+      <div style={box}>
+        {error}{" "}
+        <button onClick={onRetry} style={{ marginLeft: 8, fontFamily: "inherit", fontSize: 12, cursor: "pointer" }}>
+          다시 시도
+        </button>
+      </div>
+    );
+  if (empty) return <div style={box}>저장된 안건이 없습니다. 새 심의 요청으로 시작하세요.</div>;
+  return null;
+}

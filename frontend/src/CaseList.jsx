@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { colors } from "./theme.js";
 import { cssStr } from "./cssStr.js";
-import { cases, decorate, statusChip } from "./mockData.js";
+import { decorate, statusChip, ASSET_TYPES } from "./mockData.js";
+import { fetchReviews } from "./api.js";
+import { useAsync, AsyncStatus } from "./useAsync.jsx";
 
-const FILTERS = ["전체", "M&A", "실물자산", "그린필드"];
+const FILTERS = ["전체", ...ASSET_TYPES];
 
 export default function CaseList({ onOpenCase, onNewRequest }) {
   const [filter, setFilter] = useState("전체");
-  const dec = cases.map(decorate).filter((c) => filter === "전체" || c.assetType === filter);
+  const { data, error, loading, reload } = useAsync(fetchReviews, []);
+  const dec = (data || []).map(decorate).filter((c) => filter === "전체" || c.assetType === filter);
 
   return (
     <div style={{ padding: "26px 28px 60px", maxWidth: 1320, margin: "0 auto" }}>
@@ -54,6 +57,7 @@ export default function CaseList({ onOpenCase, onNewRequest }) {
       </div>
 
       <div style={{ background: "#fff", border: `1px solid ${colors.border}`, borderRadius: 12, overflow: "hidden" }}>
+        <AsyncStatus loading={loading} error={error} empty={!loading && !error && dec.length === 0} onRetry={reload} />
         <div style={{ overflowX: "auto" }}>
           <div style={{ minWidth: 1040 }}>
             <div style={{ display: "grid", gridTemplateColumns: "2.3fr 1fr 1fr 1fr 0.9fr 1.3fr 1.2fr 1fr", padding: "12px 20px", background: "#F7F9FB", borderBottom: `1px solid ${colors.borderLight}`, fontSize: 11, fontWeight: 600, color: colors.textMuted }}>
