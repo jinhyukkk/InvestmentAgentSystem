@@ -9,16 +9,21 @@ import io
 import json
 import logging
 import os
+import sys
 import time
 
 from contextlib import asynccontextmanager
 
 from typing import Literal
 
+# 현재 디렉터리를 sys.path에 추가
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 def load_env_file() -> None:
@@ -44,10 +49,6 @@ WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
 MAX_AUTO_APPROVALS = 5  # ponytail: 무한 루프 방지용 상한. 더 긴 조사가 필요하면 올리기
 
-API_KEY = os.environ.get("WRKS_API_KEY", "")
-if not API_KEY:
-    raise RuntimeError(".env 에 WRKS_API_KEY 를 설정하세요 (.env.example 참고)")
-
 
 def actor_header() -> dict:
     """호출 주체(직원) 구분 헤더. 이메일과 사용자 번호는 둘 중 하나만 보내야 한다."""
@@ -63,7 +64,9 @@ def actor_header() -> dict:
     return {}
 
 
-HEADERS = {"API-KEY": API_KEY, **actor_header()}
+def get_headers() -> dict:
+    key = os.environ.get("WRKS_API_KEY", "")
+    return {"API-KEY": key, **actor_header()}
 
 # uvicorn 로거는 propagate=False 라 루트에 안 묶이고(uvicorn.config.LOGGING_CONFIG 확인함),
 # 루트 자체는 아무도 설정하지 않아 이 로거의 info 로그가 logging.lastResort(WARNING 이상만
@@ -89,7 +92,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="투자심의 에이전트 프록시", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -187,7 +191,7 @@ def upload_one(chat_id: str, filename: str, content: bytes, content_type: str) -
 
     r = requests.post(
         f"{WRKS_BASE_URL}/v2/files",
-        headers=HEADERS,
+        headers=get_headers(),
         params={"chatId": chat_id},
         files={"file": (filename, content, content_type)},
         timeout=UPLOAD_TIMEOUT,
@@ -211,7 +215,7 @@ def _post_chat_stream(url: str, body: dict):
     """POST 하나의 SSE 파싱된 파트를 하나씩 yield. [DONE]에서 멈춘다."""
     resp = requests.post(
         url,
-        headers={**HEADERS, "Content-Type": "application/json"},
+        headers={**get_headers(), "Content-Type": "application/json"},
         json=body,
         stream=True,
         timeout=CHAT_TIMEOUT,
@@ -506,6 +510,12 @@ _SNAKE = {
 }
 
 
+@app.get("/health")
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok"}
+
+
 @app.get("/api/reviews")
 def list_reviews(asset_type: str | None = None, status: str | None = None):
     return db.list_reviews(asset_type, status)
@@ -527,3 +537,22 @@ def patch_review(review_id: int, patch: ReviewPatch):
     if r is None:
         raise HTTPException(404, "안건이 없습니다")
     return r
+
+
+# 정적 파일 서빙: 프론트엔드 빌드 결과물(frontend/dist)이 있으면 루트에 마운트
+frontend_dist = os.environ.get("FRONTEND_DIST") or os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if not os.path.exists(frontend_dist):
+    alt_dist = os.path.join(os.getcwd(), "frontend", "dist")
+    if os.path.exists(alt_dist):
+        frontend_dist = alt_dist
+
+if os.path.exists(frontend_dist):
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", "8787"))
+    host = os.environ.get("HOST", "0.0.0.0")
+    uvicorn.run("main:app", host=host, port=port, reload=False)

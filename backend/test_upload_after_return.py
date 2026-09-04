@@ -16,6 +16,7 @@ import os
 # 이 테스트는 main 을 import 하는 순간 .env 의 DATABASE_URL(개발 DB)을 물게 된다.
 # 아래 reset() 이 TRUNCATE 를 날리므로 test_api.py 와 같은 방식으로 테스트 DB를 하드 대입한다.
 os.environ["DATABASE_URL"] = "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test"
+os.environ.setdefault("WRKS_API_KEY", "test")
 
 import db
 import main

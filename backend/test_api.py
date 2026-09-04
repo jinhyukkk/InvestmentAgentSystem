@@ -189,6 +189,21 @@ def test_http_list_detail_patch():
     assert r.json()["status"] == "심의 대기" and r.json()["committee"] is None, "committee: null 은 해제"
 
 
+def test_health_and_frontend_serving():
+    r_health = client.get("/health")
+    assert r_health.status_code == 200
+    assert r_health.json() == {"status": "ok"}
+
+    r_api_health = client.get("/api/health")
+    assert r_api_health.status_code == 200
+    assert r_api_health.json() == {"status": "ok"}
+
+    # 프론트엔드 static 서빙 테스트
+    r_root = client.get("/")
+    assert r_root.status_code == 200
+    assert "text/html" in r_root.headers.get("content-type", "")
+
+
 if __name__ == "__main__":
     test_create_and_list()
     test_ai_turn_fills_report()
@@ -199,4 +214,5 @@ if __name__ == "__main__":
     test_kst_date_boundary()
     test_committee_status()
     test_http_list_detail_patch()
+    test_health_and_frontend_serving()
     print("test_api OK")
