@@ -14,8 +14,12 @@ import json
 import os
 
 # 이 테스트는 main 을 import 하는 순간 .env 의 DATABASE_URL(개발 DB)을 물게 된다.
-# 아래 reset() 이 TRUNCATE 를 날리므로 test_api.py 와 같은 방식으로 테스트 DB를 하드 대입한다.
-os.environ["DATABASE_URL"] = "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test"
+# 아래 reset() 이 TRUNCATE 또는 DELETE 를 날리므로 test_api.py 와 같은 방식으로 테스트 DB를 설정한다.
+if "TEST_DATABASE_URL" in os.environ:
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+else:
+    test_db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "investment_test_upload.db"))
+    os.environ["DATABASE_URL"] = f"sqlite:///{test_db_path}"
 
 import db
 import main
@@ -95,10 +99,14 @@ def make_xlsx() -> bytes:
 main.requests.post = fake_post
 
 # 매 실행이 같은 chatId("c1", "c2"…)를 쓰므로 비우고 시작해야 UNIQUE 위반 없이 저장까지 검증된다
-assert db.DATABASE_URL.endswith("_test"), f"테스트 DB가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
 db.init_db()  # 앱 기동(lifespan)이 아니라 여기서 만든다 — TestClient 는 lifespan 을 돌리지 않는다
 with db.Session(db.engine) as s:
-    s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
+    if db.is_sqlite:
+        s.execute(text("DELETE FROM turns"))
+        s.execute(text("DELETE FROM reviews"))
+    else:
+        assert db.DATABASE_URL.endswith("_test"), f"테스트 DB가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
+        s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
     s.commit()
 
 client = TestClient(main.app)

@@ -9,9 +9,11 @@
 import os
 
 os.environ["WRKS_API_KEY"] = "test"
-# 반드시 하드 대입: setdefault 를 쓰면 개발자 쉘에 DATABASE_URL 이 이미 개발 DB로 export 돼
-# 있을 때 아무 효과가 없어서, 아래 reset() 의 TRUNCATE 가 실제 운영/개발 데이터를 지워버린다.
-os.environ["DATABASE_URL"] = "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test"
+if "TEST_DATABASE_URL" in os.environ:
+    os.environ["DATABASE_URL"] = os.environ["TEST_DATABASE_URL"]
+else:
+    test_db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "investment_test.db"))
+    os.environ["DATABASE_URL"] = f"sqlite:///{test_db_path}"
 
 from sqlalchemy import text
 
@@ -21,11 +23,15 @@ REPORT = '```json\n{"total_score": 82, "recommendation": "조건부 투자 승�
 
 
 def reset():
-    # 실수로 개발 DB를 겨냥한 채 실행되더라도 TRUNCATE 가 나가기 전에 막는다
-    assert db.DATABASE_URL.endswith("_test"), f"테스트 DB(이름이 _test로 끝나야 함)가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
     db.init_db()
     with db.Session(db.engine) as s:
-        s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
+        if db.is_sqlite:
+            s.execute(text("DELETE FROM turns"))
+            s.execute(text("DELETE FROM reviews"))
+        else:
+            # 실수로 개발 DB를 겨냥한 채 실행되더라도 TRUNCATE 가 나가기 전에 막는다
+            assert db.DATABASE_URL.endswith("_test"), f"테스트 DB(이름이 _test로 끝나야 함)가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
+            s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
         s.commit()
 
 
