@@ -44,9 +44,15 @@ WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
 MAX_AUTO_APPROVALS = 5  # ponytail: 무한 루프 방지용 상한. 더 긴 조사가 필요하면 올리기
 
+# uvicorn 로거는 propagate=False 라 루트에 안 묶이고(uvicorn.config.LOGGING_CONFIG 확인함),
+# 루트 자체는 아무도 설정하지 않아 이 로거의 info 로그가 logging.lastResort(WARNING 이상만
+# 출력)에 조용히 먹힌다 — report.py 의 "json 블록 없음" 진단이 실전에서 안 보이던 원인.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("investment-proxy")
+
 API_KEY = os.environ.get("WRKS_API_KEY", "")
 if not API_KEY:
-    raise RuntimeError(".env 에 WRKS_API_KEY 를 설정하세요 (.env.example 참고)")
+    logger.warning("WRKS_API_KEY 가 설정되지 않았습니다. 실시간 심의 호출 시 .env 또는 환경변수로 설정해야 합니다.")
 
 
 def actor_header() -> dict:
@@ -63,13 +69,12 @@ def actor_header() -> dict:
     return {}
 
 
-HEADERS = {"API-KEY": API_KEY, **actor_header()}
+def get_headers() -> dict:
+    api_key = os.environ.get("WRKS_API_KEY", "") or API_KEY
+    return {"API-KEY": api_key, **actor_header()}
 
-# uvicorn 로거는 propagate=False 라 루트에 안 묶이고(uvicorn.config.LOGGING_CONFIG 확인함),
-# 루트 자체는 아무도 설정하지 않아 이 로거의 info 로그가 logging.lastResort(WARNING 이상만
-# 출력)에 조용히 먹힌다 — report.py 의 "json 블록 없음" 진단이 실전에서 안 보이던 원인.
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("investment-proxy")
+
+HEADERS = get_headers()
 
 
 @asynccontextmanager
@@ -89,7 +94,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="투자심의 에이전트 프록시", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -506,6 +512,11 @@ _SNAKE = {
 }
 
 
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.get("/api/reviews")
 def list_reviews(asset_type: str | None = None, status: str | None = None):
     return db.list_reviews(asset_type, status)
@@ -527,3 +538,35 @@ def patch_review(review_id: int, patch: ReviewPatch):
     if r is None:
         raise HTTPException(404, "안건이 없습니다")
     return r
+
+
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from fastapi.responses import FileResponse  # noqa: E402
+
+FRONTEND_DIST = os.environ.get(
+    "FRONTEND_DIST",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")),
+)
+
+if os.path.exists(FRONTEND_DIST):
+    assets_dir = os.path.join(FRONTEND_DIST, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(404, "Not Found")
+        file_path = os.path.join(FRONTEND_DIST, full_path)
+        if full_path and os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        index_file = os.path.join(FRONTEND_DIST, "index.html")
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
+        raise HTTPException(404, "Frontend build not found")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8787))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

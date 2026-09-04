@@ -1,0 +1,12 @@
+node_modules
+frontend/dist
+backend/static
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+data/*.db
+data/*.sqlite

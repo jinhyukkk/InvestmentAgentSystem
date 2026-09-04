@@ -1,8 +1,9 @@
-const API_BASE = "http://localhost:8787";
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 // 서버가 안 떠 있으면 fetch 자체가 TypeError로 죽는다 — 스트림 중단과는 원인이 달라 구분해 알린다.
 function offlineError(cause) {
-  const err = new Error(`백엔드 서버(${API_BASE})에 연결할 수 없습니다. 서버가 실행 중인지 확인해 주세요.`);
+  const target = API_BASE || "백엔드 서버";
+  const err = new Error(`${target}에 연결할 수 없습니다. 서버가 실행 중인지 확인해 주세요.`);
   err.offline = true;
   err.cause = cause;
   return err;
