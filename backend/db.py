@@ -1,10 +1,14 @@
-"""심의 이력 저장소. PostgreSQL 전용 — DATABASE_URL 이 없으면 기동하지 않는다."""
+"""심의 이력 저장소. PostgreSQL / SQLite 지원."""
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, create_engine, select
+# 현재 디렉터리를 sys.path에 추가하여 어디서 실행해도 report 모듈 등을 안정적으로 import
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -12,10 +16,18 @@ from report import extract_report
 
 logger = logging.getLogger("investment-proxy")
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-if not DATABASE_URL:
-    raise RuntimeError(".env 에 DATABASE_URL 을 설정하세요 (예: postgresql+psycopg://user:pw@host:5432/investment)")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and not DATABASE_URL.startswith("postgresql+"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+elif not DATABASE_URL:
+    DATABASE_URL = "sqlite:///investment.db"
+
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL)
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 INTAKE_FIELDS = ("company", "asset_type", "sector", "total_invest", "base_price", "review_level")
 TITLE_LEN = 24
@@ -44,12 +56,12 @@ class Review(Base):
     status: Mapped[str] = mapped_column(String, default="검토 중")
     ai_score: Mapped[int | None] = mapped_column(Integer)
     ai_rec: Mapped[str | None] = mapped_column(String)
-    report_json: Mapped[dict | None] = mapped_column(JSONB)
+    report_json: Mapped[dict | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
     manual_edited: Mapped[bool] = mapped_column(Boolean, default=False)
     committee: Mapped[str | None] = mapped_column(String)
     committee_note: Mapped[str | None] = mapped_column(Text)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    files_json: Mapped[list] = mapped_column(JSONB, default=list)
+    files_json: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
@@ -60,7 +72,7 @@ class Turn(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     review_id: Mapped[int] = mapped_column(ForeignKey("reviews.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String)  # user | ai
-    payload_json: Mapped[dict | list] = mapped_column(JSONB)
+    payload_json: Mapped[dict | list] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
