@@ -5,13 +5,27 @@
 #  4) 거절된 파일이 file-error로 보고되고 나머지는 계속 진행되는지
 #  5) 자리표시자 턴을 끝까지 읽고 나서 업로드하는지 (중도 절단 시 웍스가 504로 막는다)
 #  6) 작은 엑셀 변환본이 질문에 원문 그대로 실리는지 (검색 조각 누락으로 자료를 못 읽던 회귀)
+#  7) 출력 규칙(REPORT_INSTRUCTION)이 실제 심의 질문에만 붙는지 (자리표시자에는 X)
+#  8) meta 에 reviewId 가 실리고 안건·파일·ai 턴이 저장되는지
+#  9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행되는지
+# 10) 후속 메시지에도 출력 규칙이 붙되, 저장되는 사용자 턴에는 안 섞이는지
 import io
 import json
+import os
 
+# 이 테스트는 main 을 import 하는 순간 .env 의 DATABASE_URL(개발 DB)을 물게 된다.
+# 아래 reset() 이 TRUNCATE 를 날리므로 test_api.py 와 같은 방식으로 테스트 DB를 하드 대입한다.
+os.environ["DATABASE_URL"] = "postgresql+psycopg://postgres:postgres@localhost:5432/investment_test"
+
+import db
 import main
+from sqlalchemy import text
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from itertools import count
+
+chat_ids = count(1)
 chat_bodies = []
 uploads = []
 read_lines = []
@@ -54,10 +68,13 @@ def fake_post(url, **kwargs):
         return FakeResp(201, {"data": {"fileId": 8, "filename": name}})
 
     chat_bodies.append(kwargs["json"])
+    # 대화마다 다른 chatId — 전부 "c1" 이면 뒤쪽 심의가 같은 chat_id 로 저장되며 UNIQUE 위반이
+    # 나고, 그 트레이스백이 통과한 테스트 출력에 섞여 "실패한 것처럼" 보인다.
+    chat_id = f"c{next(chat_ids)}"
     return FakeResp(
         200,
         lines=[
-            b'data: {"type":"chat-id","chatId":"c1"}',
+            b'data: {"type":"chat-id","chatId":"%s"}' % chat_id.encode(),
             b'data: {"type":"text-delta","id":"1","delta":"ok"}',
             b'data: {"type":"finish","finishReason":"stop"}',
             b"data: [DONE]",
@@ -76,6 +93,13 @@ def make_xlsx() -> bytes:
 
 
 main.requests.post = fake_post
+
+# 매 실행이 같은 chatId("c1", "c2"…)를 쓰므로 비우고 시작해야 UNIQUE 위반 없이 저장까지 검증된다
+assert db.DATABASE_URL.endswith("_test"), f"테스트 DB가 아닌 DB를 TRUNCATE 하려 합니다: {db.DATABASE_URL}"
+db.init_db()  # 앱 기동(lifespan)이 아니라 여기서 만든다 — TestClient 는 lifespan 을 돌리지 않는다
+with db.Session(db.engine) as s:
+    s.execute(text("TRUNCATE reviews, turns RESTART IDENTITY CASCADE"))
+    s.commit()
 
 client = TestClient(main.app)
 resp = client.post(
@@ -119,5 +143,70 @@ assert "im.pdf 원문" not in review_body["message"], "변환 대상이 아닌 �
 
 # 5) 첫 업로드 전에 자리표시자 스트림이 끝까지 읽혀 있어야 한다
 assert first_upload_at[0] >= 4, f"자리표시자 턴을 끝까지 읽기 전에 업로드했다 — {first_upload_at[0]}/4줄 (504 회귀)"
+
+# 7) 출력 규칙은 실제 심의 질문에만 — 자리표시자 턴에 붙으면 첫 턴부터 보고서를 쓰려 든다
+from report import REPORT_INSTRUCTION
+
+assert chat_bodies[0]["message"] == "자료를 첨부할게", f"자리표시자가 변형됨: {chat_bodies[0]['message'][:80]}"
+assert REPORT_INSTRUCTION in review_body["message"], "실제 질문에 출력 규칙이 안 붙음"
+
+# 7-1) 자료가 없는 경로도 같은 규칙 — 이쪽 주입 지점은 별도 assert가 없어 회귀에 취약했다
+resp_no_files = client.post("/api/review", data={"message": "포트폴리오 리스크 점검해줘"})
+no_files_events = [json.loads(line) for line in resp_no_files.text.strip().splitlines()]
+assert "error" not in [e["type"] for e in no_files_events], f"error 이벤트 발생(자료 없음): {no_files_events}"
+no_files_body = chat_bodies[-1]
+assert REPORT_INSTRUCTION in no_files_body["message"], "자료 없는 경로에 출력 규칙이 안 붙음"
+
+# 8) 저장: meta 에 reviewId, 안건 1건에 파일 3건과 ai 턴 1건
+meta = next(e for e in events if e["type"] == "meta")
+assert meta.get("reviewId"), f"meta 에 reviewId 없음: {meta}"
+detail = db.get_review(meta["reviewId"])
+assert [f["filename"] for f in detail["files"]] == ["im.pdf", "chart.png", "model.md"], f"파일 저장 이상: {detail['files']}"
+roles = [t["role"] for t in detail["turns"]]
+assert roles == ["user", "ai"], f"턴 저장 이상 (자리표시자가 새어 들어갔는지 확인): {roles}"
+assert detail["turns"][0]["payload"]["text"] == "이 IM 분석해줘", "사용자 턴은 원문 그대로 (규칙 미포함)"
+assert any(e["type"] == "text-delta" for e in detail["turns"][1]["payload"]), "ai 턴 이벤트 미저장"
+
+# 10) 후속 메시지에도 출력 규칙이 붙어야 한다 — 규칙상 보고서는 중간 턴이 아니라 뒤쪽 턴에서 나오므로
+# 첫 메시지에만 붙이면 정작 보고서를 내는 턴에 규칙이 없다. 단, 저장되는 사용자 턴은 원문 그대로여야 한다.
+resp_follow = client.post("/api/review/c1/message", data={"message": "2번안으로 진행해줘"})
+assert resp_follow.status_code == 200, f"후속 메시지 실패: {resp_follow.status_code}"
+follow_body = chat_bodies[-1]
+assert REPORT_INSTRUCTION in follow_body["message"], "후속 메시지에 출력 규칙이 안 붙음"
+assert follow_body["message"].startswith("2번안으로 진행해줘"), f"사용자 메시지가 앞에 와야 함: {follow_body['message'][:40]}"
+follow_turns = db.get_review(meta["reviewId"])["turns"]
+# 안건 생성(user) → 최초 ai 응답 → 이번 후속 사용자 메시지(user) → 후속 ai 응답 순서가 그대로 저장돼야 한다
+assert [t["role"] for t in follow_turns] == ["user", "ai", "user", "ai"], f"턴 순서 이상: {[t['role'] for t in follow_turns]}"
+user_texts = [t["payload"]["text"] for t in follow_turns if t["role"] == "user"]
+assert user_texts[-1] == "2번안으로 진행해줘", f"저장된 사용자 턴에 출력 규칙이 섞였다: {user_texts[-1][:60]}"
+
+# 11) 저장 조회(find_review_id)가 DB 장애로 예외를 던져도 후속 메시지는 계속 스트리밍돼야 한다
+# (진행 중인 심의가 저장 장애로 못 쓰게 되면 안 된다는 핵심 보장)
+_orig_find_review_id = main.db.find_review_id
+
+
+def _boom(chat_id):
+    raise Exception("DB 다운 시뮬레이션")
+
+
+main.db.find_review_id = _boom
+try:
+    resp_db_down = client.post("/api/review/c1/message", data={"message": "DB 죽어도 계속"})
+finally:
+    main.db.find_review_id = _orig_find_review_id
+assert resp_db_down.status_code == 200, f"DB 장애 시 후속 메시지가 실패함: {resp_db_down.status_code} {resp_db_down.text[:200]}"
+db_down_events = [json.loads(line) for line in resp_db_down.text.strip().splitlines()]
+db_down_types = [e["type"] for e in db_down_events]
+assert "error" not in db_down_types, f"error 이벤트 발생(DB 장애): {db_down_events}"
+assert "text-delta" in db_down_types, f"정상 스트림이 아님(DB 장애): {db_down_events}"
+
+# 9) 저장된 안건이 없는 chatId 로 후속 메시지를 보내도 404가 아니라 정상 스트림으로 진행돼야 한다
+# (저장이 실패해 안건 행이 없는 대화라도, 사용자가 보고 있는 심의는 계속 쓸 수 있어야 한다)
+resp_orphan = client.post("/api/review/ghost-chat-id/message", data={"message": "후속 질문"})
+assert resp_orphan.status_code == 200, f"저장 안 된 대화의 후속 메시지가 실패함: {resp_orphan.status_code} {resp_orphan.text[:200]}"
+orphan_events = [json.loads(line) for line in resp_orphan.text.strip().splitlines()]
+orphan_types = [e["type"] for e in orphan_events]
+assert "error" not in orphan_types, f"error 이벤트 발생(안건 없음): {orphan_events}"
+assert "text-delta" in orphan_types, f"정상 스트림이 아님: {orphan_events}"
 
 print("OK:", types)

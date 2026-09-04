@@ -1,22 +1,12 @@
 import { useState } from "react";
 import { colors } from "./theme.js";
 import { cssStr } from "./cssStr.js";
-import {
-  timeline,
-  scores,
-  conditions,
-  claims,
-  perspectives,
-  redTeam,
-  pros,
-  cons,
-  mapRows,
-  criticalGaps,
-  normalGaps,
-  members,
-  financials,
-  toc,
-} from "./detailData.js";
+import { decorate, ASSET_TYPES, REVIEW_LEVELS, COMMITTEES, statusChip } from "./mockData.js";
+import { fetchReview, patchReview } from "./api.js";
+import { useAsync, AsyncStatus } from "./useAsync.jsx";
+import { toDetail, timelineFor, toc } from "./reportView.js";
+import { applyEvent, newLiveMessage } from "./streamReducer.js";
+import AiMessage from "./AiMessage.jsx";
 
 const card = { background: "#fff", border: `1px solid ${colors.border}`, borderRadius: 14 };
 const sectionTitle = (num, title) => (
@@ -27,35 +17,48 @@ const sectionTitle = (num, title) => (
 );
 const divider = <div style={{ height: 1, background: colors.borderLight, margin: "26px 0" }} />;
 
+const backBtn = { display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: colors.textMuted, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", padding: 0, marginBottom: 16 };
+const input = { fontFamily: "inherit", fontSize: 12.5, padding: "6px 8px", border: `1px solid ${colors.border}`, borderRadius: 6, width: "100%" };
+const empty = (msg = "AI 분석 결과가 아직 없습니다.") => <div style={{ fontSize: 12.5, color: colors.textFaint, padding: "10px 0" }}>{msg}</div>;
+
 export default function CaseDetail({ caseItem, onBack }) {
   const [section, setSection] = useState("s1");
+  const { data, error, loading, reload } = useAsync(() => fetchReview(caseItem.id), [caseItem?.id]);
+
+  if (!data) {
+    return (
+      <div style={{ padding: "22px 28px" }}>
+        <button onClick={onBack} style={backBtn}>← 안건 목록</button>
+        <AsyncStatus loading={loading} error={error} empty={false} onRetry={reload} />
+      </div>
+    );
+  }
+  const review = decorate(data);
+  const detail = toDetail(data.reportJson);
+  const timeline = timelineFor(review);
 
   return (
     <div style={{ padding: "22px 28px 70px", maxWidth: 1240, margin: "0 auto" }}>
-      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: colors.textMuted, fontSize: 12.5, fontFamily: "inherit", cursor: "pointer", padding: 0, marginBottom: 16 }}>
+      <button onClick={onBack} style={backBtn}>
         ← 안건 목록
       </button>
 
       <div style={{ ...card, padding: "22px 24px", marginBottom: 16, display: "flex", gap: 24, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: 1, minWidth: 280 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", marginBottom: 10 }}>
-            <span style={{ fontSize: 11, fontWeight: 600, color: colors.primary, background: colors.primaryLight, border: "1px solid #D3E0EE", padding: "3px 9px", borderRadius: 5 }}>본심의</span>
-            <span style={{ fontSize: 11, fontWeight: 600, color: "#5A6473", background: "#EEF1F4", padding: "3px 9px", borderRadius: 5 }}>{caseItem?.assetType || "M&A"}</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600, color: colors.amber, background: colors.amberBg, padding: "3px 9px", borderRadius: 20 }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#C79A3A" }} />
-              심의 대기
-            </span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: colors.primary, background: colors.primaryLight, border: "1px solid #D3E0EE", padding: "3px 9px", borderRadius: 5 }}>{review.reviewLevel || "검토 수준 미정"}</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "#5A6473", background: "#EEF1F4", padding: "3px 9px", borderRadius: 5 }}>{review.assetType || "자산유형 미정"}</span>
+            <span style={cssStr(statusChip(review.status))}>{review.status}</span>
           </div>
-          <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.03em" }}>{caseItem?.company || "대성정밀공업 인수"}</div>
+          <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.03em" }}>{review.company}</div>
           <div style={{ fontSize: 13, color: colors.textMuted, marginTop: 3 }}>
-            {caseItem?.sector || "자동차 부품"} · 안건번호 IC-2026-047
+            {review.sector || "업종 미정"} · 안건번호 IC-{review.received?.slice(0, 4) || "----"}-{String(review.id).padStart(3, "0")}
           </div>
           <div style={{ display: "flex", gap: 32, marginTop: 20, flexWrap: "wrap" }}>
             {[
-              ["총 투자비", "1,850", "억원"],
-              ["기준가", "1,720", "억원"],
-              ["접수일", "2026.05.12", ""],
-              ["인수 배수", "8.4", "x EV/EBITDA"],
+              ["총 투자비", review.investStr, ""],
+              ["기준가", review.baseStr, ""],
+              ["접수일", review.received, ""],
             ].map(([label, val, unit]) => (
               <div key={label}>
                 <div style={{ fontSize: 11.5, color: "#9AA3AF" }}>{label}</div>
@@ -66,6 +69,7 @@ export default function CaseDetail({ caseItem, onBack }) {
               </div>
             ))}
           </div>
+          <IntakeForm review={data} onSaved={reload} />
         </div>
         <div style={{ width: 220, flexShrink: 0, background: "#F7F9FB", border: "1px dashed #C9D3E0", borderRadius: 12, padding: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
@@ -73,11 +77,11 @@ export default function CaseDetail({ caseItem, onBack }) {
             <span style={{ fontSize: 10.5, color: "#9AA3AF" }}>참고 지표</span>
           </div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
-            <div style={{ fontSize: 38, fontWeight: 700, letterSpacing: "-0.03em" }}>82</div>
+            <div style={{ fontSize: 38, fontWeight: 700, letterSpacing: "-0.03em" }}>{review.scoreStr}</div>
             <div style={{ fontSize: 15, color: "#9AA3AF" }}>/ 100</div>
           </div>
           <div style={{ marginTop: 12 }}>
-            <span style={{ display: "inline-block", fontSize: 12.5, fontWeight: 700, color: colors.amber, background: colors.amberBg, padding: "6px 12px", borderRadius: 8, width: "100%", textAlign: "center" }}>조건부 투자 승인</span>
+            <span style={{ ...cssStr(review.recStyle), display: "inline-block", fontSize: 12.5, fontWeight: 700, padding: "6px 12px", borderRadius: 8, width: "100%", textAlign: "center" }}>{review.aiRec || "AI 분석 전"}</span>
           </div>
         </div>
       </div>
@@ -113,24 +117,26 @@ export default function CaseDetail({ caseItem, onBack }) {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
             <div style={{ fontSize: 13.5, fontWeight: 700 }}>AI 점수 패널</div>
             <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-              <span style={{ fontSize: 22, fontWeight: 700 }}>82</span>
+              <span style={{ fontSize: 22, fontWeight: 700 }}>{review.scoreStr}</span>
               <span style={{ fontSize: 12, color: "#9AA3AF" }}>/ 100</span>
             </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {scores.map((s) => (
-              <div key={s.label}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-                  <span style={{ fontSize: 12.5, color: "#3A4656", fontWeight: 500 }}>{s.label}</span>
-                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>
-                    {s.valStr} <span style={{ fontWeight: 500, color: colors.textFaint }}>/ {s.max}</span>
-                  </span>
-                </div>
-                <div style={{ height: 7, background: "#EEF1F4", borderRadius: 4, overflow: "hidden" }}>
-                  <div style={{ width: `${s.pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
-                </div>
-              </div>
-            ))}
+            {detail
+              ? detail.scores.map((s) => (
+                  <div key={s.label}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                      <span style={{ fontSize: 12.5, color: "#3A4656", fontWeight: 500 }}>{s.label}</span>
+                      <span style={{ fontSize: 12.5, fontWeight: 700 }}>
+                        {s.valStr} <span style={{ fontWeight: 500, color: colors.textFaint }}>/ {s.max}</span>
+                      </span>
+                    </div>
+                    <div style={{ height: 7, background: "#EEF1F4", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ width: `${s.pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
+                    </div>
+                  </div>
+                ))
+              : empty()}
           </div>
           <div style={{ fontSize: 10.5, color: colors.textFaint, marginTop: 16, paddingTop: 12, borderTop: `1px solid ${colors.borderLight}`, lineHeight: 1.5 }}>
             미평가 항목은 '자료 미도달'로 표기됩니다. 그린필드 안건은 '가격 매력도' 대신 '투자 효율성'으로 평가합니다.
@@ -142,18 +148,20 @@ export default function CaseDetail({ caseItem, onBack }) {
             <span style={{ fontSize: 10.5, color: "#9AA3AF" }}>참고 · 최종 의결 아님</span>
           </div>
           <span style={{ display: "inline-block", alignSelf: "flex-start", fontSize: 14, fontWeight: 700, color: colors.amber, background: colors.amberBg, border: `1px solid ${colors.amberBorder}`, padding: "8px 16px", borderRadius: 9 }}>
-            조건부 투자 승인
+            {review.aiRec || "AI 분석 전"}
           </span>
           <div style={{ fontSize: 11.5, fontWeight: 600, color: "#5A6473", margin: "16px 0 9px" }}>충족 조건</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-            {conditions.map((text, i) => (
-              <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
-                <span style={{ width: 18, height: 18, borderRadius: 5, background: colors.amberBg, color: colors.amber, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
-                  {i + 1}
-                </span>
-                <span style={{ fontSize: 12, color: "#3A4656", lineHeight: 1.45 }}>{text}</span>
-              </div>
-            ))}
+            {detail
+              ? detail.conditions.map((text, i) => (
+                  <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+                    <span style={{ width: 18, height: 18, borderRadius: 5, background: colors.amberBg, color: colors.amber, fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+                      {i + 1}
+                    </span>
+                    <span style={{ fontSize: 12, color: "#3A4656", lineHeight: 1.45 }}>{text}</span>
+                  </div>
+                ))
+              : empty()}
           </div>
         </div>
       </div>
@@ -182,124 +190,148 @@ export default function CaseDetail({ caseItem, onBack }) {
         <div style={{ ...card, padding: "30px 34px" }}>
           <div id="s1" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("①", "개요")}
-            <p style={{ fontSize: 13.5, lineHeight: 1.75, color: "#3A4656", margin: "0 0 12px" }}>
-              대성정밀공업은 국내 자동차 정밀가공 부품 전문업체로, 현대·기아를 핵심 고객으로 안정적 매출 기반을 확보하고 있다. 본 인수는 유진그룹 자동차 부품 포트폴리오의 수직 계열화를 완성하고, 정밀가공 역량을 내재화하려는 전략적 목적을 가진다.
-            </p>
-            <p style={{ fontSize: 13.5, lineHeight: 1.75, color: "#3A4656", margin: 0 }}>
-              총 투자비 1,850억원, 기준가 1,720억원 규모이며 인수 배수는 EV/EBITDA 8.4배다. AI 분석 결과 전략적 적합성과 실행 가능성은 높게 평가되었으나, 특정 고객 의존도와 전기차 전환 리스크가 조건부 승인의 주요 근거로 도출되었다.
-            </p>
+            {detail
+              ? detail.summary
+                  .split("\n")
+                  .filter(Boolean)
+                  .map((p, i) => (
+                    <p key={i} style={{ fontSize: 13.5, lineHeight: 1.75, color: "#3A4656", margin: "0 0 12px" }}>
+                      {p}
+                    </p>
+                  ))
+              : empty()}
           </div>
           {divider}
 
           <div id="s2" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("②", "핵심 재무 지표")}
-            <div style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", background: "#F7F9FB", padding: "10px 16px", fontSize: 11.5, fontWeight: 600, color: colors.textMuted, borderBottom: `1px solid ${colors.borderLight}` }}>
-                <div>항목 (억원)</div>
-                <div style={{ textAlign: "right" }}>2023</div>
-                <div style={{ textAlign: "right" }}>2024</div>
-                <div style={{ textAlign: "right" }}>2025</div>
-              </div>
-              {financials.map((f) => (
-                <div key={f.label} style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr", padding: "11px 16px", fontSize: 12.5, borderBottom: `1px solid ${colors.borderLight}` }}>
-                  <div style={{ color: "#3A4656", fontWeight: 500 }}>{f.label}</div>
-                  <div style={{ textAlign: "right" }}>{f.y2023}</div>
-                  <div style={{ textAlign: "right" }}>{f.y2024}</div>
-                  <div style={{ textAlign: "right", color: f.warn ? "#B02A30" : undefined, fontWeight: f.warn ? 600 : undefined }}>{f.y2025}</div>
+            {detail ? (
+              <div style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: `1.4fr ${"1fr ".repeat(detail.years.length)}`, background: "#F7F9FB", padding: "10px 16px", fontSize: 11.5, fontWeight: 600, color: colors.textMuted, borderBottom: `1px solid ${colors.borderLight}` }}>
+                  <div>항목 (억원)</div>
+                  {detail.years.map((y) => (
+                    <div key={y} style={{ textAlign: "right" }}>{y}</div>
+                  ))}
                 </div>
-              ))}
-            </div>
+                {detail.financials.map((f) => (
+                  <div key={f.label} style={{ display: "grid", gridTemplateColumns: `1.4fr ${"1fr ".repeat(detail.years.length)}`, padding: "11px 16px", fontSize: 12.5, borderBottom: `1px solid ${colors.borderLight}` }}>
+                    <div style={{ color: "#3A4656", fontWeight: 500 }}>{f.label}</div>
+                    {detail.years.map((y) => (
+                      <div key={y} style={{ textAlign: "right", color: f.warn ? "#B02A30" : undefined, fontWeight: f.warn ? 600 : undefined }}>{f.values[y] ?? "—"}</div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              empty()
+            )}
           </div>
           {divider}
 
           <div id="s3" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("③", "매도자 측 주장 검증")}
-            <div style={{ display: "flex", flexDirection: "column", gap: 1, border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
-              {claims.map((c) => (
-                <div key={c.claim} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "13px 16px", borderBottom: `1px solid ${colors.borderLight}`, background: "#fff" }}>
-                  <span style={{ fontSize: 13, color: "#3A4656", lineHeight: 1.4 }}>{c.claim}</span>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, fontSize: 11, fontWeight: 600, color: c.tagColor.c, background: c.tagColor.bg, padding: "3px 10px", borderRadius: 20, whiteSpace: "nowrap" }}>{c.tag}</span>
-                </div>
-              ))}
-            </div>
+            {detail ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 1, border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
+                {detail.claims.map((c, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "13px 16px", borderBottom: `1px solid ${colors.borderLight}`, background: "#fff" }}>
+                    <span style={{ fontSize: 13, color: "#3A4656", lineHeight: 1.4 }}>{c.claim}</span>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, fontSize: 11, fontWeight: 600, color: c.tagColor.c, background: c.tagColor.bg, padding: "3px 10px", borderRadius: 20, whiteSpace: "nowrap" }}>{c.tag}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              empty()
+            )}
           </div>
           {divider}
 
           <div id="s4" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("④", "4관점 분석")}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 12 }}>
-              {perspectives.map((p) => (
-                <div key={p.name} style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, padding: 15 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, color: colors.primary, marginBottom: 8 }}>{p.name}</div>
-                  <div style={{ fontSize: 12, color: "#5A6473", lineHeight: 1.6 }}>{p.summary}</div>
+            {detail ? (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 12 }}>
+                  {detail.perspectives.map((p, i) => (
+                    <div key={i} style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, padding: 15 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 700, color: colors.primary, marginBottom: 8 }}>{p.name}</div>
+                      <div style={{ fontSize: 12, color: "#5A6473", lineHeight: 1.6 }}>{p.summary}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div style={{ border: "1px solid #EDD3D3", borderRadius: 10, padding: "16px 18px", background: "#FCF6F6" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: "#B02A30" }}>레드팀 관점</span>
-                <span style={{ fontSize: 10.5, color: "#C08A87", background: "#F7E7E6", padding: "2px 7px", borderRadius: 4, fontWeight: 600 }}>반대 관점 전용</span>
-              </div>
-              <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A5B58", marginBottom: 7 }}>취약가정 TOP 3</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
-                {redTeam.weak.map((w) => (
-                  <div key={w} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "#5A4A48", lineHeight: 1.45 }}>
-                    <span style={{ color: "#B02A30", fontWeight: 700 }}>·</span>
-                    {w}
+                <div style={{ border: "1px solid #EDD3D3", borderRadius: 10, padding: "16px 18px", background: "#FCF6F6" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: "#B02A30" }}>레드팀 관점</span>
+                    <span style={{ fontSize: 10.5, color: "#C08A87", background: "#F7E7E6", padding: "2px 7px", borderRadius: 4, fontWeight: 600 }}>반대 관점 전용</span>
                   </div>
-                ))}
-              </div>
-              <div style={{ background: "#fff", border: "1px solid #EDD3D3", borderRadius: 8, padding: "11px 13px" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#B02A30", marginBottom: 4 }}>최악 시나리오</div>
-                <div style={{ fontSize: 12, color: "#5A4A48", lineHeight: 1.55 }}>{redTeam.worst}</div>
-              </div>
-            </div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: "#8A5B58", marginBottom: 7 }}>취약가정 TOP 3</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+                    {detail.redTeam.weak.map((w, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12, color: "#5A4A48", lineHeight: 1.45 }}>
+                        <span style={{ color: "#B02A30", fontWeight: 700 }}>·</span>
+                        {w}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ background: "#fff", border: "1px solid #EDD3D3", borderRadius: 8, padding: "11px 13px" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#B02A30", marginBottom: 4 }}>최악 시나리오</div>
+                    <div style={{ fontSize: 12, color: "#5A4A48", lineHeight: 1.55 }}>{detail.redTeam.worst}</div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              empty()
+            )}
           </div>
           {divider}
 
           <div id="s5" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("⑤", "찬성 · 반대 논거")}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-              <div style={{ border: "1px solid #D6E7DE", borderRadius: 10, padding: 15, background: "#F6FBF8" }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: colors.green, marginBottom: 11 }}>찬성 논거</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-                  {pros.map((p) => (
-                    <div key={p} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: "#3A4656", lineHeight: 1.5 }}>
-                      <span style={{ color: colors.green, fontWeight: 700, marginTop: -1 }}>+</span>
-                      {p}
-                    </div>
-                  ))}
+            {detail ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div style={{ border: "1px solid #D6E7DE", borderRadius: 10, padding: 15, background: "#F6FBF8" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: colors.green, marginBottom: 11 }}>찬성 논거</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                    {detail.pros.map((p, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: "#3A4656", lineHeight: 1.5 }}>
+                        <span style={{ color: colors.green, fontWeight: 700, marginTop: -1 }}>+</span>
+                        {p}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ border: "1px solid #EDD9C0", borderRadius: 10, padding: 15, background: "#FCF9F3" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: colors.amber, marginBottom: 11 }}>반대 · 유의 논거</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+                    {detail.cons.map((c, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: "#3A4656", lineHeight: 1.5 }}>
+                        <span style={{ color: colors.amber, fontWeight: 700, marginTop: -1 }}>–</span>
+                        {c}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div style={{ border: "1px solid #EDD9C0", borderRadius: 10, padding: 15, background: "#FCF9F3" }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: colors.amber, marginBottom: 11 }}>반대 · 유의 논거</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-                  {cons.map((c) => (
-                    <div key={c} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: "#3A4656", lineHeight: 1.5 }}>
-                      <span style={{ color: colors.amber, fontWeight: 700, marginTop: -1 }}>–</span>
-                      {c}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+            ) : (
+              empty()
+            )}
           </div>
           {divider}
 
           <div id="s6" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("⑥", "심의 점수")}
             <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-              {scores.map((s) => (
-                <div key={s.label} style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                  <span style={{ fontSize: 12.5, color: "#3A4656", width: 130, flexShrink: 0, fontWeight: 500 }}>{s.label}</span>
-                  <div style={{ flex: 1, height: 8, background: "#EEF1F4", borderRadius: 4, overflow: "hidden" }}>
-                    <div style={{ width: `${s.pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
-                  </div>
-                  <span style={{ fontSize: 12.5, fontWeight: 700, width: 64, textAlign: "right" }}>
-                    {s.valStr} <span style={{ fontWeight: 500, color: colors.textFaint }}>/ {s.max}</span>
-                  </span>
-                </div>
-              ))}
+              {detail
+                ? detail.scores.map((s) => (
+                    <div key={s.label} style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                      <span style={{ fontSize: 12.5, color: "#3A4656", width: 130, flexShrink: 0, fontWeight: 500 }}>{s.label}</span>
+                      <div style={{ flex: 1, height: 8, background: "#EEF1F4", borderRadius: 4, overflow: "hidden" }}>
+                        <div style={{ width: `${s.pct}%`, height: "100%", background: s.color, borderRadius: 4 }} />
+                      </div>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, width: 64, textAlign: "right" }}>
+                        {s.valStr} <span style={{ fontWeight: 500, color: colors.textFaint }}>/ {s.max}</span>
+                      </span>
+                    </div>
+                  ))
+                : empty()}
             </div>
           </div>
           {divider}
@@ -310,22 +342,26 @@ export default function CaseDetail({ caseItem, onBack }) {
               <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>취약가정 ↔ 선행조건 매핑</h3>
             </div>
             <p style={{ fontSize: 12, color: "#9AA3AF", margin: "0 0 14px" }}>레드팀이 지적한 취약가정이 어떤 선행조건(충족 조건)으로 해소되는지 대응 관계를 정리합니다.</p>
-            <div style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 0.5fr", background: "#F7F9FB", padding: "10px 16px", fontSize: 11.5, fontWeight: 600, color: colors.textMuted, borderBottom: `1px solid ${colors.borderLight}` }}>
-                <div>취약가정</div>
-                <div>선행조건</div>
-                <div style={{ textAlign: "right" }}>이행</div>
-              </div>
-              {mapRows.map((r) => (
-                <div key={r.a} style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 0.5fr", padding: "12px 16px", borderBottom: `1px solid ${colors.borderLight}`, alignItems: "center", gap: 10 }}>
-                  <div style={{ fontSize: 12, color: "#3A4656", lineHeight: 1.4 }}>{r.a}</div>
-                  <div style={{ fontSize: 12, color: "#5A6473", lineHeight: 1.4 }}>{r.c}</div>
-                  <div style={{ textAlign: "right" }}>
-                    <span style={{ display: "inline-block", fontSize: 10.5, fontWeight: 600, color: r.sColor.c, background: r.sColor.bg, padding: "2px 8px", borderRadius: 16, whiteSpace: "nowrap" }}>{r.s}</span>
-                  </div>
+            {detail ? (
+              <div style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 0.5fr", background: "#F7F9FB", padding: "10px 16px", fontSize: 11.5, fontWeight: 600, color: colors.textMuted, borderBottom: `1px solid ${colors.borderLight}` }}>
+                  <div>취약가정</div>
+                  <div>선행조건</div>
+                  <div style={{ textAlign: "right" }}>이행</div>
                 </div>
-              ))}
-            </div>
+                {detail.mapRows.map((r, i) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 0.5fr", padding: "12px 16px", borderBottom: `1px solid ${colors.borderLight}`, alignItems: "center", gap: 10 }}>
+                    <div style={{ fontSize: 12, color: "#3A4656", lineHeight: 1.4 }}>{r.a}</div>
+                    <div style={{ fontSize: 12, color: "#5A6473", lineHeight: 1.4 }}>{r.c}</div>
+                    <div style={{ textAlign: "right" }}>
+                      <span style={{ display: "inline-block", fontSize: 10.5, fontWeight: 600, color: r.sColor.c, background: r.sColor.bg, padding: "2px 8px", borderRadius: 16, whiteSpace: "nowrap" }}>{r.s}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              empty()
+            )}
           </div>
           {divider}
 
@@ -336,77 +372,159 @@ export default function CaseDetail({ caseItem, onBack }) {
                 <span style={{ fontSize: 10, fontWeight: 700, color: "#3B5A86", background: colors.primaryLight, padding: "2px 6px", borderRadius: 4 }}>AI 분석 권고</span>
                 <span style={{ fontSize: 10.5, color: "#9AA3AF" }}>참고용 — 위원회 의결로 대체됨</span>
               </div>
-              <span style={{ display: "inline-block", fontSize: 14, fontWeight: 700, color: colors.amber, background: colors.amberBg, border: `1px solid ${colors.amberBorder}`, padding: "7px 15px", borderRadius: 8 }}>조건부 투자 승인</span>
-              <p style={{ fontSize: 12.5, color: "#5A6473", lineHeight: 1.65, margin: "12px 0 0" }}>
-                전략적 적합성과 안정적 현금흐름을 근거로 투자 타당성은 인정되나, 고객 의존도·인수가·우발부채 관련 3개 선행조건 충족을 전제로 한다.
-              </p>
+              <span style={{ display: "inline-block", fontSize: 14, fontWeight: 700, color: colors.amber, background: colors.amberBg, border: `1px solid ${colors.amberBorder}`, padding: "7px 15px", borderRadius: 8 }}>{review.aiRec || "AI 분석 전"}</span>
+              <p style={{ fontSize: 12.5, color: "#5A6473", lineHeight: 1.65, margin: "12px 0 0" }}>{detail?.recommendationReason || empty("AI 권고 사유가 아직 없습니다.")}</p>
             </div>
           </div>
           {divider}
 
           <div id="s8" style={{ scrollMarginTop: 80 }}>
             {sectionTitle("⑧", "추가 확인 필요 항목")}
-            <div style={{ border: "1px solid #E7C9C9", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
-              <div style={{ background: "#FBEEED", padding: "9px 16px", fontSize: 11.5, fontWeight: 700, color: "#B02A30" }}>⚠ 치명적 정보 부족 · 권고 제한 사유</div>
-              {criticalGaps.map((g) => (
-                <div key={g} style={{ padding: "12px 16px", fontSize: 12.5, color: "#5A4A48", lineHeight: 1.5, background: "#fff" }}>
-                  {g}
+            {detail ? (
+              <>
+                <div style={{ border: "1px solid #E7C9C9", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+                  <div style={{ background: "#FBEEED", padding: "9px 16px", fontSize: 11.5, fontWeight: 700, color: "#B02A30" }}>⚠ 치명적 정보 부족 · 권고 제한 사유</div>
+                  {detail.criticalGaps.map((g, i) => (
+                    <div key={i} style={{ padding: "12px 16px", fontSize: 12.5, color: "#5A4A48", lineHeight: 1.5, background: "#fff" }}>
+                      {g}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ background: "#F7F9FB", padding: "9px 16px", fontSize: 11.5, fontWeight: 700, color: "#5A6473" }}>일반 추가 확인 항목</div>
-              {normalGaps.map((g) => (
-                <div key={g} style={{ padding: "11px 16px", fontSize: 12.5, color: "#3A4656", borderTop: `1px solid ${colors.borderLight}`, display: "flex", alignItems: "center", gap: 9 }}>
-                  <span style={{ width: 15, height: 15, border: "1.5px solid #CDD3DB", borderRadius: 4, flexShrink: 0 }} />
-                  {g}
+                <div style={{ border: `1px solid ${colors.borderLight}`, borderRadius: 10, overflow: "hidden" }}>
+                  <div style={{ background: "#F7F9FB", padding: "9px 16px", fontSize: 11.5, fontWeight: 700, color: "#5A6473" }}>일반 추가 확인 항목</div>
+                  {detail.normalGaps.map((g, i) => (
+                    <div key={i} style={{ padding: "11px 16px", fontSize: 12.5, color: "#3A4656", borderTop: `1px solid ${colors.borderLight}`, display: "flex", alignItems: "center", gap: 9 }}>
+                      <span style={{ width: 15, height: 15, border: "1.5px solid #CDD3DB", borderRadius: 4, flexShrink: 0 }} />
+                      {g}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </>
+            ) : (
+              empty()
+            )}
+          </div>
+          {divider}
+          <div id="s9" style={{ scrollMarginTop: 80 }}>
+            {sectionTitle("⑨", "대화 이력")}
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {data.turns.map((t, i) =>
+                t.role === "user" ? (
+                  <div key={i} style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <div style={{ maxWidth: "78%", background: colors.primary, color: "#fff", borderRadius: "14px 14px 4px 14px", padding: "12px 14px", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                      {t.payload.files?.length > 0 && <div style={{ fontSize: 11, opacity: 0.8, marginBottom: 6 }}>📎 {t.payload.files.map((f) => f.name).join(", ")}</div>}
+                      {t.payload.text}
+                    </div>
+                  </div>
+                ) : (
+                  <div key={i} style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 8, background: colors.primaryLight, color: "#3B5A86", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>AI</div>
+                    <AiMessage data={t.payload.reduce(applyEvent, newLiveMessage())} />
+                  </div>
+                )
+              )}
             </div>
+
           </div>
         </div>
       </div>
 
       <div style={{ ...card, marginTop: 16, overflow: "hidden" }}>
         <div style={{ background: colors.navy, color: "#fff", padding: "15px 24px", display: "flex", alignItems: "center", gap: 9 }}>
-          <span style={{ fontSize: 14, fontWeight: 700 }}>위원 심의 · 의결</span>
+          <span style={{ fontSize: 14, fontWeight: 700 }}>위원회 최종 결정</span>
           <span style={{ fontSize: 11, color: "#9DB0C7", marginLeft: 6 }}>최종 결정 영역 · AI 분석과 별개</span>
         </div>
-        <div style={{ padding: "22px 24px", display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 26 }}>
-          <div>
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: "#5A6473", marginBottom: 14 }}>위원별 심의 의견</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {members.map((m) => (
-                <div key={m.name} style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                  <div style={{ width: 36, height: 36, borderRadius: "50%", background: m.opColor.bg, color: m.opColor.c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{m.initial}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                      <span style={{ fontSize: 13, fontWeight: 600 }}>{m.name}</span>
-                      <span style={{ fontSize: 11, color: "#9AA3AF" }}>{m.role}</span>
-                      <span style={{ display: "inline-block", fontSize: 11, fontWeight: 700, color: m.opColor.c, background: m.opColor.bg, padding: "3px 11px", borderRadius: 20 }}>{m.op}</span>
-                    </div>
-                    <div style={{ fontSize: 12.5, color: "#5A6473", lineHeight: 1.5 }}>{m.text}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div style={{ borderLeft: `1px solid ${colors.borderLight}`, paddingLeft: 26 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: "#5A6473", marginBottom: 4 }}>간사 — 위원회 최종 결정</div>
-            <div style={{ fontSize: 11, color: "#9AA3AF", marginBottom: 14 }}>이 화면은 목업 데이터입니다. 실제 의결 저장 기능은 아직 연동되지 않았습니다.</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {["승인", "조건부 승인", "부결", "추가 검토 후 재상정"].map((label) => (
-                <label key={label} style={{ display: "flex", alignItems: "center", gap: 10, border: `1.5px solid ${colors.border}`, borderRadius: 9, padding: "11px 14px", cursor: "pointer", fontSize: 13 }}>
-                  <span style={{ width: 16, height: 16, borderRadius: "50%", border: "1.5px solid #CDD3DB" }} />
-                  {label}
-                </label>
-              ))}
-            </div>
-            <button style={{ width: "100%", marginTop: 16, background: colors.navy, color: "#fff", border: "none", borderRadius: 9, padding: 12, fontSize: 13.5, fontWeight: 700, fontFamily: "inherit", cursor: "not-allowed" }} disabled>
-              최종 의결 확정
-            </button>
-          </div>
-        </div>
+        <DecisionForm review={data} onSaved={reload} />
+      </div>
+    </div>
+  );
+}
+
+// 접수 정보는 AI가 1차 추출하지만 틀릴 수 있다. 한 번 고치면 이후 AI 재파싱이 덮어쓰지 않는다(서버 manual_edited).
+function IntakeForm({ review, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({});
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  if (!open)
+    return (
+      <button onClick={() => { setForm({ company: review.company || "", assetType: review.assetType || "", sector: review.sector || "", totalInvest: review.totalInvest ?? "", basePrice: review.basePrice ?? "", reviewLevel: review.reviewLevel || "" }); setOpen(true); }} style={{ ...backBtn, marginTop: 14, marginBottom: 0 }}>
+        ✎ 접수 정보 수정
+      </button>
+    );
+  async function save() {
+    setSaving(true);
+    try {
+      await patchReview(review.id, {
+        company: form.company || null,
+        assetType: form.assetType || null,
+        sector: form.sector || null,
+        totalInvest: form.totalInvest === "" ? null : Number(form.totalInvest),
+        basePrice: form.basePrice === "" ? null : Number(form.basePrice),
+        reviewLevel: form.reviewLevel || null,
+      });
+      setOpen(false);
+      onSaved();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 14, maxWidth: 560 }}>
+      <input style={input} placeholder="안건명" value={form.company} onChange={set("company")} />
+      <select style={input} value={form.assetType} onChange={set("assetType")}>
+        <option value="">자산유형</option>
+        {ASSET_TYPES.map((t) => <option key={t}>{t}</option>)}
+      </select>
+      <input style={input} placeholder="업종" value={form.sector} onChange={set("sector")} />
+      <input style={input} type="number" placeholder="총 투자비(억원)" value={form.totalInvest} onChange={set("totalInvest")} />
+      <input style={input} type="number" placeholder="기준가(억원)" value={form.basePrice} onChange={set("basePrice")} />
+      <select style={input} value={form.reviewLevel} onChange={set("reviewLevel")}>
+        <option value="">검토 수준</option>
+        {REVIEW_LEVELS.map((t) => <option key={t}>{t}</option>)}
+      </select>
+      <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8 }}>
+        <button onClick={save} disabled={saving} style={{ ...input, width: "auto", background: colors.primary, color: "#fff", border: "none", cursor: "pointer" }}>저장</button>
+        <button onClick={() => setOpen(false)} style={{ ...input, width: "auto", cursor: "pointer" }}>취소</button>
+      </div>
+    </div>
+  );
+}
+
+// 위원회 결정을 넣으면 status 가 '완료'가 되고, 비우면 '심의 대기'로 돌아간다(서버 규칙).
+function DecisionForm({ review, onSaved }) {
+  const [committee, setCommittee] = useState(review.committee || "");
+  const [note, setNote] = useState(review.committeeNote || "");
+  const [saving, setSaving] = useState(false);
+  async function save() {
+    setSaving(true);
+    try {
+      await patchReview(review.id, { committee: committee || null, committeeNote: note || null });
+      onSaved();
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <div style={{ padding: "22px 24px", display: "grid", gridTemplateColumns: "1fr 1.3fr", gap: 26 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {["", ...COMMITTEES].map((v) => (
+          <label key={v} style={{ display: "flex", alignItems: "center", gap: 10, border: `1.5px solid ${committee === v ? colors.navy : colors.border}`, borderRadius: 9, padding: "11px 14px", cursor: "pointer", fontSize: 13 }}>
+            <input type="radio" name="committee" value={v} checked={committee === v} onChange={() => setCommittee(v)} />
+            {v || "미결 (심의 전)"}
+          </label>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <textarea style={{ ...input, minHeight: 120, resize: "vertical" }} placeholder="의결 메모 (선택)" value={note} onChange={(e) => setNote(e.target.value)} />
+        <button onClick={save} disabled={saving} style={{ background: colors.navy, color: "#fff", border: "none", borderRadius: 9, padding: 12, fontSize: 13.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer" }}>
+          {saving ? "저장 중…" : "최종 의결 확정"}
+        </button>
+        {review.decidedAt && <div style={{ fontSize: 11, color: colors.textMuted }}>결정일 {review.decidedAt}</div>}
       </div>
     </div>
   );

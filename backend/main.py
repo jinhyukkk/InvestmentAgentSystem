@@ -11,10 +11,15 @@ import logging
 import os
 import time
 
+from contextlib import asynccontextmanager
+
+from typing import Literal
+
 import requests
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
 def load_env_file() -> None:
     """.env 의 KEY=VALUE 를 환경변수로 올린다 (이미 설정된 환경변수가 우선)."""
@@ -30,6 +35,10 @@ def load_env_file() -> None:
 
 
 load_env_file()  # AGENT_ID·API_KEY 를 읽기 전에 올려야 .env 값이 먹는다
+
+# db 는 import 시점에 DATABASE_URL 을 요구한다 — 반드시 load_env_file() 뒤에서 import 해야 한다
+import db  # noqa: E402
+from report import ASSET_TYPES, COMMITTEES, REPORT_INSTRUCTION, REVIEW_LEVELS  # noqa: E402
 
 WRKS_BASE_URL = "https://gateway-api.wrks.ai"
 AGENT_ID = os.environ.get("INVESTMENT_AGENT_ID", "22231")
@@ -56,7 +65,28 @@ def actor_header() -> dict:
 
 HEADERS = {"API-KEY": API_KEY, **actor_header()}
 
-app = FastAPI(title="투자심의 에이전트 프록시")
+# uvicorn 로거는 propagate=False 라 루트에 안 묶이고(uvicorn.config.LOGGING_CONFIG 확인함),
+# 루트 자체는 아무도 설정하지 않아 이 로거의 info 로그가 logging.lastResort(WARNING 이상만
+# 출력)에 조용히 먹힌다 — report.py 의 "json 블록 없음" 진단이 실전에서 안 보이던 원인.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("investment-proxy")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """DB가 죽어 있어도 앱은 뜬다 — 저장만 degrade 되고 심의는 계속 진행돼야 한다.
+
+    import 시점에 create_all 을 부르면 PostgreSQL 이 내려간 순간 uvicorn 자체가 기동에
+    실패해, 스트리밍 쪽에서 공들여 지킨 "저장 장애가 심의를 끊지 않는다" 원칙이 무너진다.
+    """
+    try:
+        db.init_db()
+    except Exception:
+        logger.exception("DB 초기화 실패 — 이력 저장 없이 기동합니다")
+    yield
+
+
+app = FastAPI(title="투자심의 에이전트 프록시", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -64,12 +94,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 def ndjson(obj) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-
-
-logger = logging.getLogger("investment-proxy")
 
 
 def friendly_error(e: Exception) -> str:
@@ -279,6 +305,51 @@ def wrks_chat_events(url: str, message: str, image_file_ids: list[int] | None = 
         body = {"agentId": AGENT_ID, "approval": {"id": pending_approval_id, "approved": True}}
 
 
+def record(events, user_text: str, files_meta: list[dict], review_id: int | None = None):
+    """릴레이하면서 안건·턴을 DB에 남긴다. 저장 실패는 로그만 — 심의가 저장 장애로 끊기면 안 된다.
+
+    새 심의는 meta 에서 안건을 만들고(reviewId 를 meta 에 실음), 이어가기는 review_id 를 받아 온다.
+    turn-start~turn-end 사이 이벤트를 모아 ai 턴 하나로 저장한다.
+    review_id 가 끝까지 None 이면(안건 생성 실패, 또는 안건 없이 이어가기) 저장 분기는 전부
+    비활성 — 릴레이만 계속된다.
+
+    try 는 db.* 호출만 감싼다. evt 딕셔너리 접근까지 같이 감싸면 이벤트 처리 버그(KeyError 등)가
+    "저장 실패"로 위장돼 로그에서 DB 장애와 구분이 안 된다.
+    """
+    buf = None
+    for evt in events:
+        t = evt.get("type")
+        if t == "meta" and review_id is None:
+            chat_id = evt["chatId"]
+            try:
+                review_id = db.create_review(chat_id, user_text, files_meta)
+            except Exception:
+                logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+            else:
+                evt = {**evt, "reviewId": review_id}
+        elif t == "file-uploaded":
+            # 버퍼링(elif buf is not None) 분기보다 먼저 판정한다 — turn-start~end 사이에
+            # 파일 이벤트가 끼어도 순서에 기대지 않고 항상 파일로 저장한다.
+            if review_id is not None:
+                file = evt["file"]
+                try:
+                    db.add_file(review_id, file)
+                except Exception:
+                    logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+        elif t == "turn-start":
+            buf = []
+        elif t == "turn-end":
+            if buf is not None and review_id is not None:
+                try:
+                    db.save_ai_turn(review_id, buf)
+                except Exception:
+                    logger.exception("심의 이력 저장 실패 (review=%s)", review_id)
+            buf = None  # 저장 성공 여부와 무관하게 다음 턴을 위해 초기화
+        elif buf is not None:
+            buf.append(evt)
+        yield evt
+
+
 def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
     """대화 생성 → (파일이 있으면) 업로드 → 사용자 메시지 순으로 진행한다.
 
@@ -291,7 +362,8 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
         has_files = bool(files)
         # 답변 길이를 지시하지 않는다 — "'네'라고만 답해" 같은 지시는 다음 턴까지 이어져
         # 정작 사용자의 질문에도 "네."로만 답해버린다(실측 회귀).
-        first_message = "자료를 첨부할게" if has_files else message
+        # 파일이 없으면 이 첫 메시지가 곧 심의 요청이므로 출력 규칙을 여기 붙인다
+        first_message = "자료를 첨부할게" if has_files else f"{message}\n\n{REPORT_INSTRUCTION}"
         chat_id = None
 
         events = wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream", first_message)
@@ -301,22 +373,22 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
             # 같은 chatId 업로드가 10초 뒤 504로 막힌다(끝까지 읽으면 0.7초에 201).
             for evt in events:
                 if evt["type"] == "error":
-                    yield ndjson(evt)
+                    yield evt
                     continue
                 if evt["type"] == "meta":
                     chat_id = evt["chatId"]
-                    yield ndjson(evt)
+                    yield evt
         else:
-            yield ndjson({"type": "turn-start"})
+            yield {"type": "turn-start"}
             for evt in events:
                 if evt["type"] == "meta":
                     chat_id = evt["chatId"]
-                yield ndjson(evt)
-            yield ndjson({"type": "turn-end"})
+                yield evt
+            yield {"type": "turn-end"}
 
         if not chat_id:
             logger.warning("자리표시자 턴에서 chatId를 못 받음 (files=%d)", len(files))
-            yield ndjson({"type": "error", "message": "대화를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요."})
+            yield {"type": "error", "message": "대화를 시작하지 못했습니다. 잠시 후 다시 시도해 주세요."}
             return
 
         image_file_ids = []
@@ -327,14 +399,14 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
                 data, inline = upload_one(chat_id, filename, content, content_type)
             except UploadRejected as e:
                 # 한 파일이 거절돼도 나머지는 진행하되, 어떤 파일이 왜 빠졌는지는 알린다
-                yield ndjson({"type": "file-error", "message": str(e)})
+                yield {"type": "file-error", "message": str(e)}
                 continue
             if data.get("imageUrl"):  # 이미지 응답에만 있다 = 대화에 안 묶였다는 뜻
                 image_file_ids.append(data["fileId"])
             uploaded_names.append(data.get("filename", filename))
             if inline:
                 inline_docs.append((data.get("filename", filename), inline))
-            yield ndjson({"type": "file-uploaded", "file": data})
+            yield {"type": "file-uploaded", "file": data}
 
         if has_files:
             if uploaded_names:
@@ -347,36 +419,111 @@ def stream_new_review(message: str, files: list[tuple[str, bytes, str]]):
                     message = f"{message}\n\n---\n[아래는 첨부 자료 원문이다. 검색 없이 이 내용을 그대로 쓸 것]\n\n{body}"
                 if len(inline_docs) < len(uploaded_names):
                     time.sleep(INDEX_SETTLE_SECONDS)  # 검색에 기대는 자료가 남았을 때만 기다린다
-            yield ndjson({"type": "turn-start"})
+            # 자리표시자가 아닌 실제 심의 질문에만 출력 규칙을 붙인다
+            message = f"{message}\n\n{REPORT_INSTRUCTION}"
+            yield {"type": "turn-start"}
             for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message, image_file_ids):
-                yield ndjson(evt)
-            yield ndjson({"type": "turn-end"})
+                yield evt
+            yield {"type": "turn-end"}
     except Exception as e:
-        yield ndjson({"type": "error", "message": friendly_error(e)})
+        yield {"type": "error", "message": friendly_error(e)}
 
 
 def stream_continue(chat_id: str, message: str):
+    """후속 메시지. 출력 규칙은 매 턴 다시 붙인다.
+
+    규칙 자체가 "중간 단계 답변에는 붙이지 말 것"이라 실제 보고서는 첫 턴이 아니라 뒤쪽 턴에서
+    나온다 — 첫 메시지에만 붙이면 정작 보고서를 내는 턴에서는 규칙이 오래된 컨텍스트가 된다.
+    추출은 마지막 json 블록을 쓰므로 여러 번 붙어도 무해하다.
+    DB에 남는 사용자 턴은 규칙이 빠진 원문이어야 한다(대화 이력 화면이 그대로 보여준다) —
+    그래서 저장은 호출부(continue_review)에서 원문으로 먼저 하고, 여기서는 상류로 보낼 때만 붙인다.
+    """
     try:
-        yield ndjson({"type": "turn-start"})
-        for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", message):
-            yield ndjson(evt)
-        yield ndjson({"type": "turn-end"})
+        yield {"type": "turn-start"}
+        for evt in wrks_chat_events(f"{WRKS_BASE_URL}/v2/chat/stream/{chat_id}", f"{message}\n\n{REPORT_INSTRUCTION}"):
+            yield evt
+        yield {"type": "turn-end"}
     except Exception as e:
-        yield ndjson({"type": "error", "message": friendly_error(e)})
+        yield {"type": "error", "message": friendly_error(e)}
 
 
 @app.post("/api/review")
 async def start_review(message: str = Form(...), files: list[UploadFile] = File(default=[])):
-    """새 심의 요청: 대화 생성 → 자료 업로드 → 검토 요청까지 실시간 스트림으로 릴레이.
+    """새 심의 요청: 대화 생성 → 자료 업로드 → 검토 요청까지 실시간 스트림으로 릴레이하며 DB에 기록.
 
     FastAPI는 핸들러가 반환되는 즉시 UploadFile을 닫으므로(스트리밍 제너레이터는
     그 이후에 실행됨) 여기서 bytes로 미리 읽어 넘긴다 — 안 그러면 read of closed file.
     """
     payloads = [(f.filename, await f.read(), f.content_type) for f in files if f.filename]
-    return StreamingResponse(stream_new_review(message, payloads), media_type="application/x-ndjson")
+    files_meta = [{"name": name, "size": len(content)} for name, content, _ in payloads]
+    events = record(stream_new_review(message, payloads), message, files_meta)
+    return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")
 
 
 @app.post("/api/review/{chat_id}/message")
-async def continue_review(chat_id: str, message: str = Form(...)):
-    """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이."""
-    return StreamingResponse(stream_continue(chat_id, message), media_type="application/x-ndjson")
+def continue_review(chat_id: str, message: str = Form(...)):
+    """기존 심의 대화에 후속 메시지(예: "1번으로 진행해 줘") 전송, 실시간 스트림으로 릴레이하며 DB에 기록.
+
+    안건 생성이 저장 실패로 비어있는 대화(review_id 없음)라도 후속 메시지는 계속 진행한다 —
+    저장 장애가 진행 중인 심의를 영구히 못 쓰게 만들면 안 된다는 원칙. 이 경우 저장은 건너뛴다.
+    동기 def 라야 FastAPI가 스레드풀에서 돌려 db.* 동기 호출이 이벤트 루프를 막지 않는다.
+    """
+    try:
+        review_id = db.find_review_id(chat_id)
+        if review_id is None:
+            logger.warning("저장된 안건 없이 후속 메시지 진행 (chat=%s)", chat_id)
+        else:
+            db.add_user_turn(review_id, message)
+    except Exception:
+        # DB가 죽어 있으면 여기서 500을 내버리는 순간 진행 중이던 심의가 못 쓰게 된다 —
+        # 안건 없이 이어가는 orphan 경로와 동일하게 review_id=None 으로 릴레이만 계속한다
+        logger.exception("후속 메시지 저장 조회 실패 — 안건 없이 진행 (chat=%s)", chat_id)
+        review_id = None
+    events = record(stream_continue(chat_id, message), message, [], review_id)
+    return StreamingResponse((ndjson(e) for e in events), media_type="application/x-ndjson")
+
+
+class ReviewPatch(BaseModel):
+    """사람이 고치는 필드만. status·점수는 서버가 정하므로 받지 않는다(extra=forbid)."""
+
+    model_config = ConfigDict(extra="forbid")
+    company: str | None = None
+    assetType: Literal[ASSET_TYPES] | None = None
+    sector: str | None = None
+    totalInvest: float | None = None
+    basePrice: float | None = None
+    reviewLevel: Literal[REVIEW_LEVELS] | None = None
+    committee: Literal[COMMITTEES] | None = None
+    committeeNote: str | None = None
+
+
+_SNAKE = {
+    "assetType": "asset_type",
+    "totalInvest": "total_invest",
+    "basePrice": "base_price",
+    "reviewLevel": "review_level",
+    "committeeNote": "committee_note",
+}
+
+
+@app.get("/api/reviews")
+def list_reviews(asset_type: str | None = None, status: str | None = None):
+    return db.list_reviews(asset_type, status)
+
+
+@app.get("/api/reviews/{review_id}")
+def get_review(review_id: int):
+    r = db.get_review(review_id)
+    if r is None:
+        raise HTTPException(404, "안건이 없습니다")
+    return r
+
+
+@app.patch("/api/reviews/{review_id}")
+def patch_review(review_id: int, patch: ReviewPatch):
+    # exclude_unset: 보낸 필드만 갱신한다. null 을 보내면 지운다(위원회 결정 해제).
+    fields = {_SNAKE.get(k, k): v for k, v in patch.model_dump(exclude_unset=True).items()}
+    r = db.update_review(review_id, fields)
+    if r is None:
+        raise HTTPException(404, "안건이 없습니다")
+    return r

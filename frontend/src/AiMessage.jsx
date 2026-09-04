@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { colors } from "./theme.js";
-import Markdown from "./Markdown.jsx";
+import Markdown, { stripReportJson } from "./Markdown.jsx";
 
 const styles = {
   stack: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 },
@@ -97,7 +97,7 @@ export default function AiMessage({ data, streaming }) {
           <ReasoningBlock key={i} text={b.text} thinking={thinkingAtEnd && i === lastIndex} />
         ) : (
           <div key={i} style={styles.card}>
-            <Markdown className="md-content" text={b.text + (streaming && i === lastTextIndex ? " ▌" : "")} />
+            <Markdown className="md-content" text={stripReportJson(b.text) + (streaming && i === lastTextIndex ? " ▌" : "")} />
           </div>
         )
       )}
